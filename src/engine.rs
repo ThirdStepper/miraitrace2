@@ -1,6 +1,7 @@
 use rand::{Rng, SeedableRng};
 use rand_pcg::Pcg32;
 use std::sync::Arc;
+use rayon::prelude::*;
 
 use crate::dna::{Genome, Polygon};
 use crate::fitness::sad_rgb_parallel;
@@ -558,7 +559,7 @@ impl Engine {
         let poly = Arc::make_mut(&mut candidate.polys[poly_idx]);
         poly.points[vert_idx] = (x, y);
         // Invalidate cached path since vertices changed
-        *poly.cached_path.borrow_mut() = None;
+        *poly.cached_path.lock().unwrap() = None;
 
         // Optimize the modified polygon (matching movePoint lines 94-95)
         let (genome, _rgba, _fitness) = optimize_shape(
@@ -603,7 +604,7 @@ impl Engine {
                     (0.0, self.genome.height as f32),
                 ],
                 rgba: [dom_color[0], dom_color[1], dom_color[2], 1.0],
-                cached_path: std::cell::RefCell::new(None),
+                cached_path: std::sync::Mutex::new(None),
             };
             self.genome.polys.push(Arc::new(background));  // Wrap in Arc for copy-on-write
             let rgba = CpuRenderer::render_rgba_premul(&self.genome);
@@ -640,30 +641,59 @@ impl Engine {
             self.try_add_poly(update_callback); // Has its own fitness check and optimization
         }
 
-        // Batch mutations: remove/reorder/movePoint (matching widget.cpp:321-331)
-        let mut candidate = self.genome.clone();
-        let mut candidate_rgba = self.current_rgba.clone();
+        // Parallel batch evaluation: generate multiple candidates and pick the best
+        // If batch_size == 1, fall back to sequential evaluation (original behavior)
+        if self.cfg.batch_size > 1 {
+            profiling::scope!("batch_evaluation");
 
-        if self.rng.random::<f32>() < self.cfg.p_remove && polys_size > self.cfg.min_tris {
-            self.remove_poly(&mut candidate);
-            candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
-        }
+            // Generate seeds for each candidate (ensures reproducibility)
+            let seeds: Vec<u64> = (0..self.cfg.batch_size)
+                .map(|_| self.rng.random::<u64>())
+                .collect();
 
-        if self.rng.random::<f32>() < self.cfg.p_reorder {
-            self.reorder_poly(&mut candidate, update_callback);
-            candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
-        }
+            // Evaluate all candidates in parallel
+            let candidates: Vec<(Genome, f64)> = seeds
+                .par_iter()
+                .map(|&seed| self.generate_candidate(seed))
+                .collect();
 
-        if self.rng.random::<f32>() < self.cfg.p_move_point {
-            self.move_point(&mut candidate, update_callback);
-            candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
-        }
+            // Find best candidate
+            let best = candidates.iter()
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Evaluate batched mutations (matching widget.cpp:334-341)
-        let candidate_fitness = sad_rgb_parallel(&self.target_rgba, &candidate_rgba);
-        if candidate_fitness <= old_fitness {
-            self.genome = candidate;
-            self.update_current(candidate_rgba, candidate_fitness);
+            // Accept if better than current (or equal - allows sideways moves)
+            if let Some((best_genome, best_fitness)) = best {
+                if *best_fitness <= old_fitness {
+                    let best_rgba = CpuRenderer::render_rgba_premul(best_genome);
+                    self.genome = best_genome.clone();
+                    self.update_current(best_rgba, *best_fitness);
+                }
+            }
+        } else {
+            // Original sequential evaluation (batch_size == 1)
+            let mut candidate = self.genome.clone();
+            let mut candidate_rgba = self.current_rgba.clone();
+
+            if self.rng.random::<f32>() < self.cfg.p_remove && polys_size > self.cfg.min_tris {
+                self.remove_poly(&mut candidate);
+                candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
+            }
+
+            if self.rng.random::<f32>() < self.cfg.p_reorder {
+                self.reorder_poly(&mut candidate, update_callback);
+                candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
+            }
+
+            if self.rng.random::<f32>() < self.cfg.p_move_point {
+                self.move_point(&mut candidate, update_callback);
+                candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
+            }
+
+            let candidate_fitness = sad_rgb_parallel(&self.target_rgba, &candidate_rgba);
+            if candidate_fitness <= old_fitness {
+                self.genome = candidate;
+                self.update_current(candidate_rgba, candidate_fitness);
+            }
         }
 
         self.generation += 1;
@@ -677,5 +707,107 @@ impl Engine {
         let h = self.genome.height as u64;
         let worst_fitness = w * h * 3u64 * 255u64;
         (100.0 - (self.current_fitness / worst_fitness as f64 * 100.0)) as f32
+    }
+
+    /// Generate a random mutation and return a candidate genome with fitness
+    /// Used for batch parallel evaluation
+    fn generate_candidate(&self, seed: u64) -> (Genome, f64) {
+        profiling::scope!("generate_candidate");
+
+        // Create thread-local RNG from seed
+        let mut rng = Pcg32::seed_from_u64(seed);
+        let mut candidate = self.genome.clone();
+
+        // Randomly apply mutations based on probabilities
+        let polys_size = candidate.polys.len();
+
+        // Remove mutation
+        if rng.random::<f32>() < self.cfg.p_remove && polys_size > self.cfg.min_tris {
+            if !candidate.polys.is_empty() {
+                let idx = if let Some(region) = &self.focus_region {
+                    // Try to find polygon in focus region
+                    let mut found_idx = None;
+                    for _ in 0..100 {
+                        let test_idx = rng.random_range(0..candidate.polys.len());
+                        if candidate.polys[test_idx].intersects_region(region, candidate.width, candidate.height) {
+                            found_idx = Some(test_idx);
+                            break;
+                        }
+                    }
+                    found_idx
+                } else {
+                    Some(rng.random_range(0..candidate.polys.len()))
+                };
+
+                if let Some(idx) = idx {
+                    candidate.polys.remove(idx);
+                }
+            }
+        }
+
+        // Reorder mutation
+        if rng.random::<f32>() < self.cfg.p_reorder && candidate.polys.len() >= 2 {
+            let src_idx = if let Some(region) = &self.focus_region {
+                let mut found_idx = None;
+                for _ in 0..100 {
+                    let test_idx = rng.random_range(0..candidate.polys.len());
+                    if candidate.polys[test_idx].intersects_region(region, candidate.width, candidate.height) {
+                        found_idx = Some(test_idx);
+                        break;
+                    }
+                }
+                found_idx
+            } else {
+                Some(rng.random_range(0..candidate.polys.len()))
+            };
+
+            if let Some(src) = src_idx {
+                let dst = rng.random_range(0..candidate.polys.len());
+                if src != dst {
+                    let poly = candidate.polys.remove(src);
+                    candidate.polys.insert(dst, poly);
+                }
+            }
+        }
+
+        // Move point mutation
+        if rng.random::<f32>() < self.cfg.p_move_point && !candidate.polys.is_empty() {
+            let poly_idx = if let Some(region) = &self.focus_region {
+                let mut found_idx = None;
+                for _ in 0..100 {
+                    let test_idx = rng.random_range(0..candidate.polys.len());
+                    if candidate.polys[test_idx].intersects_region(region, candidate.width, candidate.height) {
+                        found_idx = Some(test_idx);
+                        break;
+                    }
+                }
+                found_idx
+            } else {
+                Some(rng.random_range(0..candidate.polys.len()))
+            };
+
+            if let Some(idx) = poly_idx {
+                if !candidate.polys[idx].points.is_empty() {
+                    let vert_idx = rng.random_range(0..candidate.polys[idx].points.len());
+                    let (mut x, mut y) = candidate.polys[idx].points[vert_idx];
+
+                    let dx = rng.random_range(-self.cfg.pos_sigma..=self.cfg.pos_sigma);
+                    let dy = rng.random_range(-self.cfg.pos_sigma..=self.cfg.pos_sigma);
+
+                    x = (x + dx).clamp(0.0, candidate.width as f32 - 1.0);
+                    y = (y + dy).clamp(0.0, candidate.height as f32 - 1.0);
+
+                    let poly = Arc::make_mut(&mut candidate.polys[idx]);
+                    poly.points[vert_idx] = (x, y);
+                    *poly.cached_path.lock().unwrap() = None;
+                }
+            }
+        }
+
+        // Render and evaluate
+        let candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
+        let candidate_fitness = sad_rgb_parallel(&self.target_rgba, &candidate_rgba);
+
+        (candidate, candidate_fitness)
     }
 }

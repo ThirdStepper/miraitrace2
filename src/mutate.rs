@@ -3,6 +3,7 @@ use crate::render::CpuRenderer;
 use crate::fitness::{sad_rgb_parallel, poly_bounds_aa, sad_rgb_rect, blit_rect};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use rayon::prelude::*;
 
 // Counter for throttling GUI updates during optimization
 // Updates GUI every Nth improvement to balance visual feedback with performance
@@ -40,6 +41,9 @@ pub struct MutateConfig {
     // Alpha range (matching original 20-200 / 255)
     pub alpha_min: f32,
     pub alpha_max: f32,
+
+    // Batch evaluation
+    pub batch_size: usize,  // Number of candidates to evaluate in parallel per generation
 }
 
 impl Default for MutateConfig {
@@ -67,6 +71,9 @@ impl Default for MutateConfig {
             // Alpha range (20-200 in [0,255] → 0.078-0.784)
             alpha_min: 20.0 / 255.0,
             alpha_max: 200.0 / 255.0,
+
+            // Batch evaluation (8 candidates per generation)
+            batch_size: 8,
         }
     }
 }
@@ -115,8 +122,11 @@ fn apply_color_direction(rgba: &mut [f32; 4], dir: ColorDirection, step: f32, cf
     }
 }
 
-/// Optimize colors of a specific triangle using hill climbing (matches Evolve's optimizeColors).
+/// Optimize colors of a specific triangle using parallel steepest descent.
 /// Tries 10 dimensions: lighter/darker, +/- R/G/B, +/- alpha.
+///
+/// NEW: Tests ALL directions in parallel each iteration (steepest descent),
+/// instead of testing one at a time (coordinate descent). Fully utilizes all CPU cores.
 ///
 /// Returns: (optimized_genome, final_rgba, final_fitness) to avoid redundant renders by caller.
 ///
@@ -172,31 +182,34 @@ where
     let width = genome.width;
     let height = genome.height;
 
-    // Hill-climb: loop until a full pass finds nothing
+    // Steepest descent: loop until testing all directions finds no improvement
     'outer: loop {
-        let mut improved_any = false;
+        profiling::scope!("optimize_colors_iteration");
 
-        for &direction in &DIRECTIONS {
-            // Save original RGBA before mutating (just 4 floats - no expensive clone!)
-            let orig_rgba = best.polys[tri_idx].rgba;
+        // Compute bbox of current polygon (before any mutations)
+        let (x_min_old, y_min_old, x_max_old, y_max_old) =
+            poly_bounds_aa(&best.polys[tri_idx], width, height);
 
-            // Compute bbox of current polygon (before mutation) with AA padding
-            let (x_min_old, y_min_old, x_max_old, y_max_old) =
-                poly_bounds_aa(&best.polys[tri_idx], width, height);
+        // Compute SAD over current rect (baseline for delta computation)
+        let sad_old_rect = sad_rgb_rect(target_premul, &current_render_premul,
+            x_min_old, y_min_old, x_max_old, y_max_old, width);
 
-            // Copy-on-write: clone polygon only if shared with other genomes
-            let poly = Arc::make_mut(&mut best.polys[tri_idx]);
+        // Test ALL directions in parallel (each thread has its own rendering state via thread_local!)
+        let results: Vec<_> = DIRECTIONS.par_iter().map(|&direction| {
+            profiling::scope!("test_direction");
 
-            // Mutate in place using enum-based direction
+            // Clone genome for this thread (Arc makes this cheap - just pointer copies)
+            let mut candidate = best.clone();
+            let orig_rgba = candidate.polys[tri_idx].rgba;
+
+            // Apply mutation
+            let poly = Arc::make_mut(&mut candidate.polys[tri_idx]);
             apply_color_direction(&mut poly.rgba, direction, step, cfg);
-
-            // Ensure alpha bound (already done in apply_color_direction, but double-check)
             poly.rgba[3] = poly.rgba[3].clamp(cfg.alpha_min, 1.0);
 
-            // Compute bbox of mutated polygon - for color mutations, bbox usually stays same
-            // but we compute it anyway for correctness (alpha changes can affect AA extent slightly)
+            // Compute bbox of mutated polygon
             let (x_min_new, y_min_new, x_max_new, y_max_new) =
-                poly_bounds_aa(&best.polys[tri_idx], width, height);
+                poly_bounds_aa(&candidate.polys[tri_idx], width, height);
 
             // Union of old and new bboxes (affected region)
             let x_min = x_min_old.min(x_min_new);
@@ -204,12 +217,8 @@ where
             let x_max = x_max_old.max(x_max_new);
             let y_max = y_max_old.max(y_max_new);
 
-            // Compute SAD over rect in current state
-            let sad_old_rect = sad_rgb_rect(target_premul, &current_render_premul,
-                x_min, y_min, x_max, y_max, width);
-
-            // Render candidate PREMULT (no expensive unpremultiply!)
-            let cand_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&best, tri_idx, &base_premul);
+            // Render candidate (thread-local SCRATCH_PIX means no contention!)
+            let cand_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&candidate, tri_idx, &base_premul);
 
             // Compute SAD over rect in candidate state
             let sad_new_rect = sad_rgb_rect(target_premul, &cand_render_premul,
@@ -218,47 +227,53 @@ where
             // Update global fitness: fitness_new = fitness_old - SAD(old_rect) + SAD(new_rect)
             let cand_fitness = current_fitness - sad_old_rect + sad_new_rect;
 
-            if cand_fitness < current_fitness {
-                // Accept - keep the mutation and update current_render_premul
-                // Only blit the affected rect (no need to copy entire buffer!)
-                blit_rect(&cand_render_premul, &mut current_render_premul,
-                    x_min, y_min, x_max, y_max, width);
+            // Return all info needed to accept this direction
+            (direction, candidate, cand_render_premul, cand_fitness, orig_rgba, x_min, y_min, x_max, y_max)
+        }).collect();
 
-                current_fitness = cand_fitness;
-                improved_any = true;
+        // Find best improvement from parallel results
+        let best_result = results.iter()
+            .min_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
+
+        if let Some((_direction, candidate, cand_render_premul, cand_fitness, _orig_rgba, x_min, y_min, x_max, y_max)) = best_result {
+            if *cand_fitness < current_fitness {
+                // Accept best improvement
+                best = candidate.clone();
+
+                // Only blit the affected rect (no need to copy entire buffer!)
+                blit_rect(cand_render_premul, &mut current_render_premul,
+                    *x_min, *y_min, *x_max, *y_max, width);
+
+                current_fitness = *cand_fitness;
 
                 // Counter-based GUI throttling (cheap atomic increment + modulo)
-                // Only unpremultiply + callback every Nth improvement for visual feedback
+                // Callback every Nth improvement for visual feedback
                 let count = IMPROVEMENT_COUNTER.fetch_add(1, Ordering::Relaxed);
                 let update_rate = GUI_UPDATE_RATE.load(Ordering::Relaxed);
                 if count % update_rate == 0 {
-                    // Unpremultiply only when we're going to show it
-                    // Note: we need the full buffer for display, so we pass current_render_premul
-                    let unpremul = crate::render::unpremultiply(&current_render_premul);
-                    update_callback(&best, &unpremul, current_fitness, true);
+                    // Pass premultiplied directly (egui supports it natively)
+                    update_callback(&best, &current_render_premul, current_fitness, true);
                 }
 
-                // Keep going; classic greedy climb
-                continue;
-            } else {
-                // Reject - restore original RGBA (no need to restore buffer, we didn't update it)
-                let poly = Arc::make_mut(&mut best.polys[tri_idx]);
-                poly.rgba = orig_rgba;
+                // Continue outer loop - test all directions again
+                continue 'outer;
             }
         }
 
-        if !improved_any { break 'outer; }
+        // No improvement found in any direction - converged
+        break 'outer;
     }
 
-    // Unpremultiply final result once for return (UI expects unpremultiplied)
-    let final_render = crate::render::unpremultiply(&current_render_premul);
-
+    // Return premultiplied result (egui supports it natively, no conversion needed)
     // Return final state (genome, rgba, fitness) to avoid redundant renders by caller
-    (best, final_render, current_fitness)
+    (best, current_render_premul, current_fitness)
 }
 
-/// Optimize shape of a specific triangle using hill climbing (matches Evolve's optimizeShape).
+/// Optimize shape of a specific triangle using parallel steepest descent.
 /// Tries moving each vertex in 4 directions: up, right, down, left.
+///
+/// NEW: Tests ALL directions for ALL vertices in parallel each iteration,
+/// instead of testing one vertex-direction at a time. Fully utilizes all CPU cores.
 ///
 /// Returns: (optimized_genome, final_rgba, final_fitness) to avoid redundant renders by caller.
 ///
@@ -298,87 +313,102 @@ where
     let width = genome.width;
     let height = genome.height;
 
-    // For each vertex, hill-climb in 4 dirs until no improvement
     let num_points = best.polys[tri_idx].points.len();
-    for vi in 0..num_points {
-        'vertex: loop {
-            let mut improved_vertex = false;
 
-            for &(dx, dy) in dirs {
-                // Save original point before mutating (just 2 floats - no expensive clone!)
-                let orig_point = best.polys[tri_idx].points[vi];
+    // Steepest descent: loop until testing all vertex-direction combinations finds no improvement
+    'outer: loop {
+        profiling::scope!("optimize_shape_iteration");
 
-                // Compute bbox of current polygon (before mutation) with AA padding
-                let (x_min_old, y_min_old, x_max_old, y_max_old) =
-                    poly_bounds_aa(&best.polys[tri_idx], width, height);
+        // Compute bbox of current polygon (before any mutations)
+        let (x_min_old, y_min_old, x_max_old, y_max_old) =
+            poly_bounds_aa(&best.polys[tri_idx], width, height);
 
-                // Copy-on-write: clone polygon only if shared with other genomes
-                let poly = Arc::make_mut(&mut best.polys[tri_idx]);
+        // Compute SAD over current rect (baseline for delta computation)
+        let sad_old_rect = sad_rgb_rect(target_premul, &current_render_premul,
+            x_min_old, y_min_old, x_max_old, y_max_old, width);
 
-                // Mutate in place
-                let (mut x, mut y) = orig_point;
-                x = (x + dx).clamp(0.0, (genome.width  as f32) - 1.0);
-                y = (y + dy).clamp(0.0, (genome.height as f32) - 1.0);
-                poly.points[vi] = (x, y);
-                // Invalidate cached path since vertices changed
-                *poly.cached_path.borrow_mut() = None;
-
-                // Compute bbox of mutated polygon - for shape mutations, bbox DOES change
-                let (x_min_new, y_min_new, x_max_new, y_max_new) =
-                    poly_bounds_aa(&best.polys[tri_idx], width, height);
-
-                // Union of old and new bboxes (affected region)
-                let x_min = x_min_old.min(x_min_new);
-                let y_min = y_min_old.min(y_min_new);
-                let x_max = x_max_old.max(x_max_new);
-                let y_max = y_max_old.max(y_max_new);
-
-                // Compute SAD over rect in current state
-                let sad_old_rect = sad_rgb_rect(target_premul, &current_render_premul,
-                    x_min, y_min, x_max, y_max, width);
-
-                // Render candidate PREMULT (no expensive unpremultiply!)
-                let cand_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&best, tri_idx, &base_premul);
-
-                // Compute SAD over rect in candidate state
-                let sad_new_rect = sad_rgb_rect(target_premul, &cand_render_premul,
-                    x_min, y_min, x_max, y_max, width);
-
-                // Update global fitness: fitness_new = fitness_old - SAD(old_rect) + SAD(new_rect)
-                let cand_fitness = current_fitness - sad_old_rect + sad_new_rect;
-
-                if cand_fitness < current_fitness {
-                    // Accept - keep the mutation and update current_render_premul
-                    // Only blit the affected rect (no need to copy entire buffer!)
-                    blit_rect(&cand_render_premul, &mut current_render_premul,
-                        x_min, y_min, x_max, y_max, width);
-
-                    current_fitness = cand_fitness;
-                    improved_vertex = true;
-
-                    // Counter-based GUI throttling (same as optimize_colors)
-                    let count = IMPROVEMENT_COUNTER.fetch_add(1, Ordering::Relaxed);
-                    let update_rate = GUI_UPDATE_RATE.load(Ordering::Relaxed);
-                    if count % update_rate == 0 {
-                        let unpremul = crate::render::unpremultiply(&current_render_premul);
-                        update_callback(&best, &unpremul, current_fitness, true);
-                    }
-                } else {
-                    // Reject - restore original point (no need to restore buffer, we didn't update it)
-                    let poly = Arc::make_mut(&mut best.polys[tri_idx]);
-                    poly.points[vi] = orig_point;
-                    // Invalidate cached path since we restored the original point
-                    *poly.cached_path.borrow_mut() = None;
-                }
+        // Build list of all (vertex_index, direction) pairs to test in parallel
+        let mut tests = Vec::with_capacity(num_points * dirs.len());
+        for vi in 0..num_points {
+            for &dir in dirs {
+                tests.push((vi, dir));
             }
-
-            if !improved_vertex { break 'vertex; }
         }
+
+        // Test ALL vertex-direction combinations in parallel
+        let results: Vec<_> = tests.par_iter().map(|&(vi, (dx, dy))| {
+            profiling::scope!("test_vertex_direction");
+
+            // Clone genome for this thread
+            let mut candidate = best.clone();
+            let orig_point = candidate.polys[tri_idx].points[vi];
+
+            // Apply mutation
+            let poly = Arc::make_mut(&mut candidate.polys[tri_idx]);
+            let (mut x, mut y) = orig_point;
+            x = (x + dx).clamp(0.0, (width as f32) - 1.0);
+            y = (y + dy).clamp(0.0, (height as f32) - 1.0);
+            poly.points[vi] = (x, y);
+            // Invalidate cached path since vertices changed
+            *poly.cached_path.lock().unwrap() = None;
+
+            // Compute bbox of mutated polygon
+            let (x_min_new, y_min_new, x_max_new, y_max_new) =
+                poly_bounds_aa(&candidate.polys[tri_idx], width, height);
+
+            // Union of old and new bboxes (affected region)
+            let x_min = x_min_old.min(x_min_new);
+            let y_min = y_min_old.min(y_min_new);
+            let x_max = x_max_old.max(x_max_new);
+            let y_max = y_max_old.max(y_max_new);
+
+            // Render candidate (thread-local SCRATCH_PIX means no contention!)
+            let cand_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&candidate, tri_idx, &base_premul);
+
+            // Compute SAD over rect in candidate state
+            let sad_new_rect = sad_rgb_rect(target_premul, &cand_render_premul,
+                x_min, y_min, x_max, y_max, width);
+
+            // Update global fitness: fitness_new = fitness_old - SAD(old_rect) + SAD(new_rect)
+            let cand_fitness = current_fitness - sad_old_rect + sad_new_rect;
+
+            // Return all info needed to accept this mutation
+            (vi, (dx, dy), candidate, cand_render_premul, cand_fitness, orig_point, x_min, y_min, x_max, y_max)
+        }).collect();
+
+        // Find best improvement from parallel results
+        let best_result = results.iter()
+            .min_by(|a, b| a.4.partial_cmp(&b.4).unwrap_or(std::cmp::Ordering::Equal));
+
+        if let Some((_vi, _dir, candidate, cand_render_premul, cand_fitness, _orig_point, x_min, y_min, x_max, y_max)) = best_result {
+            if *cand_fitness < current_fitness {
+                // Accept best improvement
+                best = candidate.clone();
+
+                // Only blit the affected rect (no need to copy entire buffer!)
+                blit_rect(cand_render_premul, &mut current_render_premul,
+                    *x_min, *y_min, *x_max, *y_max, width);
+
+                current_fitness = *cand_fitness;
+
+                // Counter-based GUI throttling
+                let count = IMPROVEMENT_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let update_rate = GUI_UPDATE_RATE.load(Ordering::Relaxed);
+                if count % update_rate == 0 {
+                    // Pass premultiplied directly (egui supports it natively)
+                    update_callback(&best, &current_render_premul, current_fitness, true);
+                }
+
+                // Continue outer loop - test all vertex-directions again
+                continue 'outer;
+            }
+        }
+
+        // No improvement found in any vertex-direction - converged
+        break 'outer;
     }
 
-    // Unpremultiply final result once for return (UI expects unpremultiplied)
-    let final_render = crate::render::unpremultiply(&current_render_premul);
-
+    // Return premultiplied result (egui supports it natively, no conversion needed)
     // Return final state (genome, rgba, fitness) to avoid redundant renders by caller
-    (best, final_render, current_fitness)
+    (best, current_render_premul, current_fitness)
 }

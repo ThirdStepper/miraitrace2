@@ -1,8 +1,7 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use crate::app::FocusRegion;
-use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// A polygon with 3-6 points (matching original Evolve's progressive detail)
 #[derive(Debug, Serialize, Deserialize)]  // Removed Clone - implemented manually below
@@ -11,10 +10,10 @@ pub struct Polygon {
     pub rgba: [f32; 4],            // un-premultiplied, 0..1
 
     // Cached tiny-skia Path (not serialized, rebuilt on load)
-    // Uses RefCell for interior mutability - allows caching in immutable contexts
+    // Uses Mutex for interior mutability - thread-safe for parallel optimization
     // Invalidate by setting to None when vertices change
     #[serde(skip)]
-    pub cached_path: RefCell<Option<tiny_skia::Path>>,
+    pub cached_path: Mutex<Option<tiny_skia::Path>>,
 }
 
 // Manual Clone implementation that resets cached_path to None
@@ -24,7 +23,7 @@ impl Clone for Polygon {
         Self {
             points: self.points.clone(),
             rgba: self.rgba,
-            cached_path: RefCell::new(None),  // Always start fresh - never copy stale paths
+            cached_path: Mutex::new(None),  // Always start fresh - never copy stale paths
         }
     }
 }
@@ -130,7 +129,7 @@ impl Genome {
         Polygon {
             points,
             rgba,
-            cached_path: RefCell::new(None),
+            cached_path: Mutex::new(None),
         }
     }
 }

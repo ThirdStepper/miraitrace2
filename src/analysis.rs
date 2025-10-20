@@ -1,5 +1,6 @@
 use crate::fitness::sad_rgb_rect;
 use crate::app::FocusRegion;
+use rayon::prelude::*;
 
 /// Find the dominant color in an image (matches Evolve's analysis.cpp).
 /// Uses a quantized color space to find the most common color region,
@@ -75,6 +76,8 @@ pub fn find_dominant_color(rgba: &[u8]) -> [f32; 3] {
 /// Returns Vec of (tile_index, sad_error, focus_region) sorted by error (worst first).
 /// Matches Evolve's computeAutofocusFitness (widget.cpp:96-144).
 ///
+/// NEW: Computes tile errors in parallel across all CPU cores for faster autofocus updates.
+///
 /// This enables adaptive autofocus: evolution concentrates on tiles with highest error.
 pub fn compute_tile_errors(
     target_premul: &[u8],
@@ -93,38 +96,41 @@ pub fn compute_tile_errors(
     let tile_height = height / grid_size;
 
     let num_tiles = (grid_size * grid_size) as usize;
-    let mut tiles: Vec<(usize, f64, FocusRegion)> = Vec::with_capacity(num_tiles);
 
-    for tile_idx in 0..num_tiles {
-        let tile_x = (tile_idx as u32 % grid_size) * tile_width;
-        let tile_y = (tile_idx as u32 / grid_size) * tile_height;
+    // Compute tile errors in parallel
+    let mut tiles: Vec<(usize, f64, FocusRegion)> = (0..num_tiles)
+        .into_par_iter()
+        .map(|tile_idx| {
+            let tile_x = (tile_idx as u32 % grid_size) * tile_width;
+            let tile_y = (tile_idx as u32 / grid_size) * tile_height;
 
-        let x_min = tile_x;
-        let y_min = tile_y;
-        let x_max = (tile_x + tile_width).min(width) - 1;
-        let y_max = (tile_y + tile_height).min(height) - 1;
+            let x_min = tile_x;
+            let y_min = tile_y;
+            let x_max = (tile_x + tile_width).min(width) - 1;
+            let y_max = (tile_y + tile_height).min(height) - 1;
 
-        // Compute SAD for this tile
-        let sad = sad_rgb_rect(
-            target_premul,
-            current_premul,
-            x_min,
-            y_min,
-            x_max,
-            y_max,
-            width,
-        );
+            // Compute SAD for this tile
+            let sad = sad_rgb_rect(
+                target_premul,
+                current_premul,
+                x_min,
+                y_min,
+                x_max,
+                y_max,
+                width,
+            );
 
-        // Create FocusRegion for this tile (normalized coordinates 0.0-1.0)
-        let focus_region = FocusRegion::new(
-            tile_x as f32 / width as f32,
-            (tile_x + tile_width) as f32 / width as f32,
-            tile_y as f32 / height as f32,
-            (tile_y + tile_height) as f32 / height as f32,
-        );
+            // Create FocusRegion for this tile (normalized coordinates 0.0-1.0)
+            let focus_region = FocusRegion::new(
+                tile_x as f32 / width as f32,
+                (tile_x + tile_width) as f32 / width as f32,
+                tile_y as f32 / height as f32,
+                (tile_y + tile_height) as f32 / height as f32,
+            );
 
-        tiles.push((tile_idx, sad, focus_region));
-    }
+            (tile_idx, sad, focus_region)
+        })
+        .collect();
 
     // Sort by error (highest error first = worst tile first)
     tiles.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

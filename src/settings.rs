@@ -75,6 +75,11 @@ pub struct AppSettings {
     pub min_tris: usize,
     /// Maximum number of triangles (cap)
     pub max_tris: usize,
+
+    // Batch Evaluation
+    /// Number of candidate mutations to evaluate in parallel per generation (1 = no batching)
+    /// Higher values = more exploration, better parallelism, but slower convergence
+    pub batch_size: usize,
 }
 
 impl Default for AppSettings {
@@ -117,6 +122,9 @@ impl Default for AppSettings {
             // Triangle limits (matching original Evolve: POLYS_MIN=15000, POLYS_MAX=150000)
             min_tris: 15_000,
             max_tris: 150_000,
+
+            // Batch evaluation (8 candidates per generation = good balance)
+            batch_size: 8,
         }
     }
 }
@@ -163,6 +171,7 @@ impl AppSettings {
             max_tris: self.max_tris,
             alpha_min: self.alpha_min,
             alpha_max: self.alpha_max,
+            batch_size: self.batch_size,
         }
     }
 }
