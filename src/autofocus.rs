@@ -2,6 +2,7 @@
 /// These provide more intelligent tile subdivision compared to uniform grids
 use crate::app::FocusRegion;
 use crate::fitness::sad_rgb_rect;
+use rayon::prelude::*;
 
 /// Compute autofocus tiles using Quadtree subdivision
 ///
@@ -244,9 +245,11 @@ fn is_region_too_small(region: &FocusRegion, width: u32, height: u32) -> bool {
 
 /// Automatically compute a reasonable error threshold for adaptive subdivision
 ///
-/// Strategy: Sample a 4×4 grid, compute tile errors
+/// Strategy: Sample a 4×4 grid, compute tile errors in parallel
 /// - BSP mode: Uses max-based threshold (fraction of worst error) - scales with fitness
 /// - Quadtree mode: Uses mean + multiplier*stddev (per-region checks)
+///
+/// NEW: Parallelizes the error sampling across all CPU cores for faster threshold computation.
 ///
 /// BSP uses max because it checks worst tile globally as stop condition
 /// Quadtree uses mean because it checks each region independently
@@ -260,24 +263,27 @@ fn compute_auto_threshold(
 ) -> f64 {
     profiling::scope!("compute_auto_threshold");
 
-    // Quick sampling: compute errors for 4×4 grid
+    // Quick sampling: compute errors for 4×4 grid in parallel
     let sample_grid_size = 4;
     let tile_width = width / sample_grid_size;
     let tile_height = height / sample_grid_size;
 
-    let mut errors = Vec::with_capacity(16);
+    let errors: Vec<f64> = (0..sample_grid_size)
+        .into_par_iter()
+        .flat_map(|tile_y| {
+            (0..sample_grid_size)
+                .into_par_iter()
+                .map(move |tile_x| {
+                    let x_min = tile_x * tile_width;
+                    let y_min = tile_y * tile_height;
+                    let x_max = ((tile_x + 1) * tile_width).min(width) - 1;
+                    let y_max = ((tile_y + 1) * tile_height).min(height) - 1;
 
-    for tile_y in 0..sample_grid_size {
-        for tile_x in 0..sample_grid_size {
-            let x_min = tile_x * tile_width;
-            let y_min = tile_y * tile_height;
-            let x_max = ((tile_x + 1) * tile_width).min(width) - 1;
-            let y_max = ((tile_y + 1) * tile_height).min(height) - 1;
-
-            let error = sad_rgb_rect(target, current, x_min, y_min, x_max, y_max, width);
-            errors.push(error);
-        }
-    }
+                    sad_rgb_rect(target, current, x_min, y_min, x_max, y_max, width)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
 
     match mode {
         "bsp" => {

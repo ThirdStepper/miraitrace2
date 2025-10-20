@@ -170,10 +170,9 @@ impl MiraiApp {
                     let mut running = false;
 
                     // Send initial state (wrap in Arc to avoid copy)
-                    // Unpremultiply lazily for UI display (current_rgba is premul internally)
-                    let unpremul = crate::render::unpremultiply(&engine.current_rgba);
+                    // Keep premultiplied format (egui supports it natively)
                     let _ = update_tx.send(EngineUpdate {
-                        current_rgba: Arc::from(unpremul.as_slice()),
+                        current_rgba: Arc::from(engine.current_rgba.as_slice()),
                         generation: engine.generation,
                         fitness: engine.fitness_percent(),
                         triangles: engine.genome.polys.len(),
@@ -260,10 +259,9 @@ impl MiraiApp {
                                 engine.autofocus_last_tiles = None;  // Clear after sending (only send once)
                             }
 
-                            // Unpremultiply lazily for UI display (current_rgba is premul internally)
-                            let unpremul = crate::render::unpremultiply(&engine.current_rgba);
+                            // Keep premultiplied format (egui supports it natively)
                             let _ = update_tx.send(EngineUpdate {
-                                current_rgba: Arc::from(unpremul.as_slice()),
+                                current_rgba: Arc::from(engine.current_rgba.as_slice()),
                                 generation: engine.generation,
                                 fitness: engine.fitness_percent(),
                                 triangles: engine.genome.polys.len(),
@@ -310,7 +308,7 @@ impl MiraiApp {
     fn update_current_texture(&mut self, ctx: &egui::Context, rgba: &Arc<[u8]>) {
         profiling::scope!("update_current_texture");
         let [w, h] = self.target_dims;
-        let img = ColorImage::from_rgba_unmultiplied([w, h], rgba.as_ref());
+        let img = ColorImage::from_rgba_premultiplied([w, h], rgba.as_ref());
 
         if let Some(tex) = self.current_tex.as_mut() {
             tex.set(img, TextureOptions::LINEAR);
@@ -422,7 +420,7 @@ impl MiraiApp {
             overlay_rect,
             0.0, // no corner rounding
             egui::Stroke::new(3.0, egui::Color32::from_rgba_unmultiplied(200, 0, 0, 150)),
-            //egui::epaint::StrokeKind::Outside,
+            egui::epaint::StrokeKind::Outside,
         );
     }
 
@@ -492,7 +490,7 @@ impl MiraiApp {
                 } else {
                     egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 100))
                 };
-                painter.rect_stroke(tile_rect, 0.0, stroke);
+                painter.rect_stroke(tile_rect, 0.0, stroke, egui::epaint::StrokeKind::Outside);
             }
         }
     }
@@ -577,7 +575,7 @@ impl MiraiApp {
                             // Mode Selector
                             ui.horizontal(|ui| {
                                 ui.label("Mode:");
-                                egui::ComboBox::from_id_source("autofocus_mode")
+                                egui::ComboBox::from_id_salt("autofocus_mode")
                                     .selected_text(format!("{:?}", self.settings.autofocus_mode))
                                     .show_ui(ui, |ui| {
                                         ui.selectable_value(&mut self.settings.autofocus_mode,
@@ -1267,23 +1265,23 @@ impl eframe::App for MiraiApp {
                     ui.painter().rect_stroke(
                         drop_zone.rect,
                         8.0,
-                        egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 150, 255).linear_multiply(0.5))
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 150, 255).linear_multiply(0.5)),
+                        egui::epaint::StrokeKind::Outside,
                     );
 
-                    ui.allocate_ui_at_rect(drop_zone.rect, |ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(35.0);
-                            ui.label(egui::RichText::new("📁")
-                                .size(48.0));
-                            ui.add_space(10.0);
-                            ui.label(egui::RichText::new("Drag & Drop an image here")
-                                .size(18.0));
-                            ui.label("or");
-                            if ui.button(egui::RichText::new("Open Image… (Ctrl+O)")
-                                .size(14.0)).clicked() {
-                                self.load_target_image(ctx);
-                            }
-                        });
+                    let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(drop_zone.rect));
+                    child_ui.vertical_centered(|ui| {
+                        ui.add_space(35.0);
+                        ui.label(egui::RichText::new("📁")
+                            .size(48.0));
+                        ui.add_space(10.0);
+                        ui.label(egui::RichText::new("Drag & Drop an image here")
+                            .size(18.0));
+                        ui.label("or");
+                        if ui.button(egui::RichText::new("Open Image… (Ctrl+O)")
+                            .size(14.0)).clicked() {
+                            self.load_target_image(ctx);
+                        }
                     });
 
                     ui.add_space(40.0);

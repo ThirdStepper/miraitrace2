@@ -214,11 +214,9 @@ fn draw_polygon(pix: &mut sk::Pixmap, poly: &Polygon, transform: sk::Transform) 
         return; // fully off-screen: skip tiny-skia work
     }
 
-    // Use cached path if available (with interior mutability via RefCell)
-    let cached = poly.cached_path.borrow();
+    // Use cached path if available (with interior mutability via Mutex for thread-safety)
+    let mut cached = poly.cached_path.lock().unwrap();
     let path = if cached.is_none() {
-        drop(cached); // Drop borrow before mutably borrowing
-
         // Build path
         let mut pb = sk::PathBuilder::new();
         pb.move_to(poly.points[0].0, poly.points[0].1);
@@ -229,9 +227,10 @@ fn draw_polygon(pix: &mut sk::Pixmap, poly: &Polygon, transform: sk::Transform) 
         let new_path = pb.finish();
 
         // Cache it
-        *poly.cached_path.borrow_mut() = new_path.clone();
+        *cached = new_path.clone();
         new_path
     } else {
+        // Clone the cached Option<Path>
         cached.clone()
     };
 
