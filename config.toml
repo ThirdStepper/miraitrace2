@@ -1,0 +1,11 @@
+# .cargo/config.toml
+# Require an AVX2-era baseline across x86_64 targets (x86-64-v3 ≈ AVX2/FMA/BMI1/2/F16C)
+# Remove targets you don't use.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "force-frame-pointers=yes"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "force-frame-pointers=yes"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "force-frame-pointers=yes"]

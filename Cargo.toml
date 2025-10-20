@@ -1,0 +1,36 @@
+[package]
+name = "miraitrace2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.28.1"
+image = "0.25.8"
+
+# Profiling abstraction layer - allows switching backends via features
+profiling = "1.0"
+
+# Profiling backend (Tracy)
+tracy-client = { version = "0.18.2", optional = true, default-features = false, features = ["enable", "system-tracing", "context-switch-tracing", "sampling", "code-transfer", "broadcast"] }
+
+rand = "0.9.2"
+rand_pcg = "0.9.0"
+rayon = "1.11.0"
+rfd = "0.15.4"
+serde = { version = "1.0.228", features = ["derive", "rc"] }
+serde_json = "1.0.145"
+thiserror = "2.0.17"
+tiny-skia = "0.11.4"
+
+[features]
+default = []  # No profiling by default (opt-in with --features profile-with-tracy)
+
+# Profiling backend
+profile-with-tracy = ["profiling/profile-with-tracy", "tracy-client"]
+
+[profile.release]
+opt-level = 3          # Maximum optimization
+debug = true           # Keep symbols for profiling (minimal overhead)
+lto = true             # Link-Time Optimization (whole-program optimization)
+codegen-units = 1      # Single codegen unit for better inlining/dead code elimination
+strip = false          # Keep debug symbols for profiling
