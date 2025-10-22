@@ -92,22 +92,21 @@ pub fn compute_tile_errors(
     assert_eq!(target_premul.len(), current_premul.len());
     assert_eq!(target_premul.len(), (width * height * 4) as usize);
 
-    let tile_width = width / grid_size;
-    let tile_height = height / grid_size;
-
     let num_tiles = (grid_size * grid_size) as usize;
 
     // Compute tile errors in parallel
     let mut tiles: Vec<(usize, f64, FocusRegion)> = (0..num_tiles)
         .into_par_iter()
         .map(|tile_idx| {
-            let tile_x = (tile_idx as u32 % grid_size) * tile_width;
-            let tile_y = (tile_idx as u32 / grid_size) * tile_height;
-
-            let x_min = tile_x;
-            let y_min = tile_y;
-            let x_max = (tile_x + tile_width).min(width) - 1;
-            let y_max = (tile_y + tile_height).min(height) - 1;
+            let gx = tile_idx as u32 % grid_size;
+            let gy = tile_idx as u32 / grid_size;
+            // exact partitioning: floor((i+1)*W/G)-1
+            let x_min = ((gx * width) / grid_size).min(width - 1);
+            let x_max = ((((gx + 1) * width) / grid_size).saturating_sub(1)).min(width - 1);
+            let y_min = ((gy * height) / grid_size).min(height - 1);
+            let y_max = ((((gy + 1) * height) / grid_size).saturating_sub(1)).min(height - 1);
+            let tile_w = (x_max + 1).saturating_sub(x_min).max(1);
+            let tile_h = (y_max + 1).saturating_sub(y_min).max(1);
 
             // Compute SAD for this tile
             let sad = sad_rgb_rect(
@@ -122,10 +121,10 @@ pub fn compute_tile_errors(
 
             // Create FocusRegion for this tile (normalized coordinates 0.0-1.0)
             let focus_region = FocusRegion::new(
-                tile_x as f32 / width as f32,
-                (tile_x + tile_width) as f32 / width as f32,
-                tile_y as f32 / height as f32,
-                (tile_y + tile_height) as f32 / height as f32,
+                x_min as f32 / width as f32,
+                (x_min + tile_w) as f32 / width as f32,
+                y_min as f32 / height as f32,
+                (y_min + tile_h) as f32 / height as f32,
             );
 
             (tile_idx, sad, focus_region)

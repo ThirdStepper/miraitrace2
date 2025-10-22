@@ -17,7 +17,6 @@ fn main() -> eframe::Result<()> {
 
     // Tracy profiling is always-on when compiled with profile-with-tracy feature
     // Zero overhead when Tracy GUI is not connected
-
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
         "MiraiTrace2",

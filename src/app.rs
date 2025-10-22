@@ -1197,12 +1197,14 @@ impl eframe::App for MiraiApp {
                         let worst_sad = tiles.first().map(|(_, err, _)| err).unwrap_or(&0.0);
 
                         // Calculate proper percentage: normalize SAD against maximum possible error
-                        let grid_size = (tiles.len() as f64).sqrt() as u32;
-                        let tile_width = self.target_dims[0] as u32 / grid_size;
-                        let tile_height = self.target_dims[1] as u32 / grid_size;
-                        let tile_pixels = tile_width * tile_height;
-                        // Max SAD for RGBA (255 per channel × 4 channels) - matches fitness calculation
-                        let max_error = tile_pixels as f64 * 255.0 * 4.0;
+                        // Use actual tile area from FocusRegion (works for irregular quadtree/BSP tiles)
+                        let default_region = FocusRegion::new(0.0, 1.0, 0.0, 1.0);
+                        let worst_region = tiles.first().map(|(_, _, r)| r).unwrap_or(&default_region);
+                        let tile_width_norm = worst_region.right - worst_region.left;
+                        let tile_height_norm = worst_region.bottom - worst_region.top;
+                        let tile_pixels = (tile_width_norm * self.target_dims[0] as f32 * tile_height_norm * self.target_dims[1] as f32) as u32;
+                        // Max SAD for RGB (255 per channel × 3 channels) - matches fitness calculation
+                        let max_error = tile_pixels as f64 * 255.0 * 3.0;
                         let error_percent = (worst_sad / max_error) * 100.0;
 
                         // Display which tiles are actually active (based on mode)

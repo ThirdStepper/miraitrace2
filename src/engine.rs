@@ -16,7 +16,8 @@ pub struct Engine {
     pub genome: Genome,
     pub current_rgba: Vec<u8>, // premultiplied RGBA (tiny-skia's native format) - unpremul lazily for UI
     pub current_fitness: f64,  // SAD fitness (lower is better)
-    target_rgba: Vec<u8>,      // premultiplied RGBA (cached target for fitness comparisons)
+    target_rgba: Vec<u8>,      // premultiplied RGBA (for fitness)
+    target_unpremul: Vec<u8>,  // unpremultiplied RGBA (for color sampling / analysis)
     pub generation: u64,       // Generation counter (incremented during optimization)
     pub num_poly_points: usize, // Progressive detail: starts at 6, reduces to 3 (matching Evolve)
     pub focus_region: Option<FocusRegion>, // Optional region for targeted evolution
@@ -45,9 +46,10 @@ impl Engine {
         // Start with blank white canvas - polygons will be added during evolution
         let current_rgba = CpuRenderer::render_rgba_premul(&genome);
 
-        // Target is already premultiplied (loaded via image crate, which outputs unpremul, then we premul it)
-        // Actually, we need to premultiply the target since it comes in as unpremul from the image loader
-        let target_rgba = crate::render::premultiply(&target_rgba);
+        // Target comes in as unpremultiplied from image loader
+        // Store both premultiplied (for fitness) and unpremultiplied (for color sampling)
+        let target_unpremul = target_rgba;
+        let target_rgba = crate::render::premultiply(&target_unpremul);
         let current_fitness = sad_rgb_parallel(&target_rgba, &current_rgba);
 
         Self {
@@ -57,6 +59,7 @@ impl Engine {
             current_rgba,
             current_fitness,
             target_rgba,
+            target_unpremul,
             generation: 0,
             num_poly_points: 6, // Start with 6-point polygons (matching Evolve)
             focus_region: None, // Start with full image focus
@@ -367,7 +370,7 @@ impl Engine {
         // If focus region is set, constrain polygon to that region (matching Evolve's genPoly)
         let poly = self.genome.smart_polygon_in_region(
             &mut self.rng,
-            &self.target_rgba,
+            &self.target_unpremul,   // sample colors from UNPREMULT
             self.cfg.alpha_min,
             self.cfg.alpha_max,
             self.num_poly_points,
@@ -555,11 +558,11 @@ impl Engine {
         x = x.clamp(0.0, candidate.width as f32 - 1.0);
         y = y.clamp(0.0, candidate.height as f32 - 1.0);
 
-        // Copy-on-write: clone polygon only if shared with other genomes
-        let poly = Arc::make_mut(&mut candidate.polys[poly_idx]);
-        poly.points[vert_idx] = (x, y);
-        // Invalidate cached path since vertices changed
-        *poly.cached_path.lock().unwrap() = None;
+        // Clone polygon and modify (OnceLock doesn't support invalidation - Perf C)
+        // Clone impl resets cached_path automatically
+        let mut new_poly = (*candidate.polys[poly_idx]).clone();
+        new_poly.points[vert_idx] = (x, y);
+        candidate.polys[poly_idx] = Arc::new(new_poly);
 
         // Optimize the modified polygon (matching movePoint lines 94-95)
         let (genome, _rgba, _fitness) = optimize_shape(
@@ -595,7 +598,8 @@ impl Engine {
 
         // Initialize with dominant color background (matching Evolve widget.cpp:283-296)
         if polys_size == 0 {
-            let dom_color = find_dominant_color(&self.target_rgba);
+            // dominant color must be computed on UNPREMULT
+            let dom_color = find_dominant_color(&self.target_unpremul);
             let background = Polygon {
                 points: vec![
                     (0.0, 0.0),
@@ -604,7 +608,7 @@ impl Engine {
                     (0.0, self.genome.height as f32),
                 ],
                 rgba: [dom_color[0], dom_color[1], dom_color[2], 1.0],
-                cached_path: std::sync::Mutex::new(None),
+                cached_path: std::sync::OnceLock::new(),
             };
             self.genome.polys.push(Arc::new(background));  // Wrap in Arc for copy-on-write
             let rgba = CpuRenderer::render_rgba_premul(&self.genome);
@@ -652,21 +656,21 @@ impl Engine {
                 .collect();
 
             // Evaluate all candidates in parallel
-            let candidates: Vec<(Genome, f64)> = seeds
+            let candidates: Vec<(Genome, Vec<u8>, f64)> = seeds
                 .par_iter()
                 .map(|&seed| self.generate_candidate(seed))
                 .collect();
 
-            // Find best candidate
+            // Find best candidate by fitness (compare field 2)
             let best = candidates.iter()
-                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+                .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
             // Accept if better than current (or equal - allows sideways moves)
-            if let Some((best_genome, best_fitness)) = best {
+            // Use the already-rendered rgba to avoid redundant render (Perf B)
+            if let Some((best_genome, best_rgba, best_fitness)) = best {
                 if *best_fitness <= old_fitness {
-                    let best_rgba = CpuRenderer::render_rgba_premul(best_genome);
                     self.genome = best_genome.clone();
-                    self.update_current(best_rgba, *best_fitness);
+                    self.update_current(best_rgba.clone(), *best_fitness);
                 }
             }
         } else {
@@ -709,9 +713,10 @@ impl Engine {
         (100.0 - (self.current_fitness / worst_fitness as f64 * 100.0)) as f32
     }
 
-    /// Generate a random mutation and return a candidate genome with fitness
+    /// Generate a random mutation and return a candidate genome with fitness + render
     /// Used for batch parallel evaluation
-    fn generate_candidate(&self, seed: u64) -> (Genome, f64) {
+    /// Returns (genome, rgba_premul, fitness) to avoid re-rendering the winner (Perf B)
+    fn generate_candidate(&self, seed: u64) -> (Genome, Vec<u8>, f64) {
         profiling::scope!("generate_candidate");
 
         // Create thread-local RNG from seed
@@ -797,9 +802,10 @@ impl Engine {
                     x = (x + dx).clamp(0.0, candidate.width as f32 - 1.0);
                     y = (y + dy).clamp(0.0, candidate.height as f32 - 1.0);
 
-                    let poly = Arc::make_mut(&mut candidate.polys[idx]);
-                    poly.points[vert_idx] = (x, y);
-                    *poly.cached_path.lock().unwrap() = None;
+                    // Clone polygon and modify (OnceLock doesn't support invalidation)
+                    let mut new_poly = (*candidate.polys[idx]).clone();
+                    new_poly.points[vert_idx] = (x, y);
+                    candidate.polys[idx] = Arc::new(new_poly);
                 }
             }
         }
@@ -808,6 +814,6 @@ impl Engine {
         let candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
         let candidate_fitness = sad_rgb_parallel(&self.target_rgba, &candidate_rgba);
 
-        (candidate, candidate_fitness)
+        (candidate, candidate_rgba, candidate_fitness)
     }
 }

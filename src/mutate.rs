@@ -343,14 +343,13 @@ where
             let mut candidate = best.clone();
             let orig_point = candidate.polys[tri_idx].points[vi];
 
-            // Apply mutation
-            let poly = Arc::make_mut(&mut candidate.polys[tri_idx]);
+            // Apply mutation (clone-and-replace for OnceLock compatibility)
             let (mut x, mut y) = orig_point;
             x = (x + dx).clamp(0.0, (width as f32) - 1.0);
             y = (y + dy).clamp(0.0, (height as f32) - 1.0);
-            poly.points[vi] = (x, y);
-            // Invalidate cached path since vertices changed
-            *poly.cached_path.lock().unwrap() = None;
+            let mut new_poly = (*candidate.polys[tri_idx]).clone();
+            new_poly.points[vi] = (x, y);
+            candidate.polys[tri_idx] = Arc::new(new_poly);
 
             // Compute bbox of mutated polygon
             let (x_min_new, y_min_new, x_max_new, y_max_new) =
