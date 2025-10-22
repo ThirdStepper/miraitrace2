@@ -31,6 +31,6 @@ profile-with-tracy = ["profiling/profile-with-tracy", "tracy-client"]
 [profile.release]
 opt-level = 3          # Maximum optimization
 debug = true           # Keep symbols for profiling (minimal overhead)
-lto = true             # Link-Time Optimization (whole-program optimization)
+#lto = true             # Link-Time Optimization (whole-program optimization)
 codegen-units = 1      # Single codegen unit for better inlining/dead code elimination
 strip = false          # Keep debug symbols for profiling

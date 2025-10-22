@@ -1,6 +1,6 @@
 use tiny_skia as sk;
 use crate::dna::{Genome, Polygon};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 // Global anti-aliasing setting (can be changed from settings UI)
 static POLYGON_ANTIALIASING: AtomicBool = AtomicBool::new(true);
@@ -180,11 +180,11 @@ impl CpuRenderer {
                     draw_polygon(pix, &genome.polys[i], sk::Transform::identity());
                 }
 
-                // Reuse cached Vec instead of allocating - massive speedup!
+                // Move out the Vec with zero-copy instead of cloning (Perf A)
                 let mut vec_borrow = vec_cell.borrow_mut();
                 vec_borrow.clear();
                 vec_borrow.extend_from_slice(pix.data());
-                vec_borrow.clone()
+                std::mem::take(&mut *vec_borrow)
             })
         })
     }
@@ -214,35 +214,26 @@ fn draw_polygon(pix: &mut sk::Pixmap, poly: &Polygon, transform: sk::Transform) 
         return; // fully off-screen: skip tiny-skia work
     }
 
-    // Use cached path if available (with interior mutability via Mutex for thread-safety)
-    let mut cached = poly.cached_path.lock().unwrap();
-    let path = if cached.is_none() {
-        // Build path
+    // Use cached path with lock-free reads (OnceLock - Perf C)
+    // get_or_init populates cache on first call, subsequent calls are lock-free
+    let path = poly.cached_path.get_or_init(|| {
+        // Build path once, never rebuild (vertices are immutable after creation)
         let mut pb = sk::PathBuilder::new();
         pb.move_to(poly.points[0].0, poly.points[0].1);
         for i in 1..poly.points.len() {
             pb.line_to(poly.points[i].0, poly.points[i].1);
         }
         pb.close();
-        let new_path = pb.finish();
+        Arc::new(pb.finish().expect("path build"))
+    });
 
-        // Cache it
-        *cached = new_path.clone();
-        new_path
-    } else {
-        // Clone the cached Option<Path>
-        cached.clone()
-    };
+    let color = sk::Color::from_rgba(poly.rgba[0], poly.rgba[1], poly.rgba[2], poly.rgba[3]).unwrap();
+    let mut paint = sk::Paint::default();
+    paint.anti_alias = POLYGON_ANTIALIASING.load(Ordering::Relaxed);
+    paint.shader = sk::Shader::SolidColor(color);
 
-    if let Some(ref path) = path {
-        let color = sk::Color::from_rgba(poly.rgba[0], poly.rgba[1], poly.rgba[2], poly.rgba[3]).unwrap();
-        let mut paint = sk::Paint::default();
-        paint.anti_alias = POLYGON_ANTIALIASING.load(Ordering::Relaxed);
-        paint.shader = sk::Shader::SolidColor(color);
-
-        let fill_rule = sk::FillRule::Winding;
-        pix.fill_path(path, &paint, fill_rule, transform, None);
-    }
+    let fill_rule = sk::FillRule::Winding;
+    pix.fill_path(path, &paint, fill_rule, transform, None);
 }
 
 /// Unpremultiply RGBA - optimized scalar implementation (compiler will auto-vectorize)
