@@ -1,14 +1,13 @@
-//! Geometry validation for preventing self-intersecting polygons
-//!
-//! This module provides functions to ensure polygons remain:
-//! - Simple (no self-intersections / bow-ties)
-//! - Convex (no inward dents)
-//! - CCW winding (positive signed area)
-//!
-//! Performance: O(n²) checks with n ≤ 6 vertices → negligible overhead
+// geometry validation for preventing self-intersecting polygons
+//
+// this module provides functions to ensure polygons remain:
+// - simple (no self-intersections / bow-ties)
+// - convex (no inward dents)
+// - CCW winding (positive signed area)
 
-/// Compute signed area of a polygon using the shoelace formula.
-/// Returns positive for CCW, negative for CW, zero for degenerate.
+
+/// compute signed area of a polygon using the shoelace formula.
+/// returns positive for CCW, negative for CW, zero for degenerate.
 pub fn signed_area(pts: &[(f32, f32)]) -> f32 {
     if pts.len() < 3 {
         return 0.0;
@@ -23,8 +22,8 @@ pub fn signed_area(pts: &[(f32, f32)]) -> f32 {
     area * 0.5
 }
 
-/// Check if two line segments intersect (proper crossing, not touching).
-/// Segments: (a, b) and (c, d)
+/// check if two line segments intersect (proper crossing, not touching).
+/// segments: (a, b) and (c, d)
 fn segments_intersect(a: (f32, f32), b: (f32, f32), c: (f32, f32), d: (f32, f32)) -> bool {
     // CCW test: returns cross product sign
     fn ccw(p: (f32, f32), q: (f32, f32), r: (f32, f32)) -> f32 {
@@ -36,30 +35,30 @@ fn segments_intersect(a: (f32, f32), b: (f32, f32), c: (f32, f32), d: (f32, f32)
     let ccw_cda = ccw(c, d, a);
     let ccw_cdb = ccw(c, d, b);
 
-    // Segments intersect if endpoints are on opposite sides of each other
-    // Use a small epsilon to avoid false positives from numerical precision
+    // segments intersect if endpoints are on opposite sides of each other
+    // use a small epsilon to avoid false positives from numerical precision
     const EPSILON: f32 = 1e-8;
     (ccw_abc * ccw_abd < -EPSILON) && (ccw_cda * ccw_cdb < -EPSILON)
 }
 
-/// Check if a polygon is simple (no self-intersections).
-/// Tests all pairs of non-adjacent edges.
+/// check if a polygon is simple (no self-intersections).
+/// tests all pairs of non-adjacent edges.
 pub fn is_simple(pts: &[(f32, f32)]) -> bool {
     let n = pts.len();
     if n < 3 {
         return false;
     }
 
-    // Check all pairs of non-adjacent edges
+    // check all pairs of non-adjacent edges
     for i in 0..n {
         let j = (i + 1) % n;
         let edge1 = (pts[i], pts[j]);
 
-        // Start k at i+2 to skip adjacent edges
+        // start k at i+2 to skip adjacent edges
         for k in (i + 2)..n {
             let l = (k + 1) % n;
 
-            // Skip if edges share a vertex (adjacent at wraparound)
+            // skip if edges share a vertex (adjacent at wraparound)
             if i == l {
                 continue;
             }
@@ -74,29 +73,29 @@ pub fn is_simple(pts: &[(f32, f32)]) -> bool {
     true
 }
 
-/// Check if a polygon is convex and CCW.
-/// Assumes points are already in order (not necessarily CCW yet).
+/// check if a polygon is convex and CCW.
+/// assumes points are already in order (not necessarily CCW yet).
 pub fn is_convex_ccw(pts: &[(f32, f32)]) -> bool {
     let n = pts.len();
     if n < 3 {
         return false;
     }
 
-    // Check if area is positive (CCW)
+    // check if area is positive (CCW)
     let area = signed_area(pts);
     if area <= 0.0 {
-        return false; // Not CCW (or degenerate)
+        return false;
     }
 
-    // Check all turns are left turns (positive cross products)
-    // Allow small negative values for numerical tolerance
+    // check all turns are left turns (positive cross products)
+    // allow small negative values for numerical tolerance
     const EPSILON: f32 = -1e-6;
 
     for i in 0..n {
         let j = (i + 1) % n;
         let k = (j + 1) % n;
 
-        // Compute cross product at vertex j
+        // compute cross product at vertex j
         let dx1 = pts[j].0 - pts[i].0;
         let dy1 = pts[j].1 - pts[i].1;
         let dx2 = pts[k].0 - pts[j].0;
@@ -104,38 +103,36 @@ pub fn is_convex_ccw(pts: &[(f32, f32)]) -> bool {
         let cross = dx1 * dy2 - dy1 * dx2;
 
         if cross < EPSILON {
-            return false; // Right turn or collinear (concave)
+            return false; // right turn or collinear (concave)
         }
     }
 
     true
 }
 
-/// Sanitize a polygon to be CCW, simple, and convex.
+/// sanitize a polygon to be CCW, simple, and convex.
+/// steps:
+/// 1. ensure CCW winding (reverse if needed)
+/// 2. check if simple and convex (no self-intersections)
 ///
-/// Steps:
-/// 1. Ensure CCW winding (reverse if needed)
-/// 2. Check if simple (no self-intersections)
-/// 3. Check if convex
-///
-/// Returns true if valid, false if unfixable.
-/// Modifies `pts` in-place to fix winding if needed.
+/// returns true if valid, false if unfixable.
+/// modifies `pts` in-place to fix winding if needed.
 pub fn sanitize_ccw_simple_convex(pts: &mut [(f32, f32)]) -> bool {
     if pts.len() < 3 {
         return false;
     }
 
-    // Step 1: Ensure CCW winding
+    // step 1
     if signed_area(pts) < 0.0 {
         pts.reverse();
     }
 
-    // Step 2: Check if simple and convex
+    // step 2
     is_simple(pts) && is_convex_ccw(pts)
 }
 
-/// Dirty rectangle for tracking which pixels were modified during optimization.
-/// Used for incremental tile cache updates (only recompute affected tiles).
+/// dirty rectangle for tracking which pixels were modified during optimization.
+/// used for incremental tile cache updates (only recompute affected tiles).
 #[derive(Clone, Copy, Debug)]
 pub struct DirtyRect {
     pub x0: u32,
@@ -145,13 +142,13 @@ pub struct DirtyRect {
 }
 
 impl DirtyRect {
-    /// Create a new dirty rect from pixel coordinates (inclusive bounds)
+    /// create a new dirty rect from pixel coordinates (inclusive bounds)
     #[inline]
     pub fn new(x0: u32, y0: u32, x1: u32, y1: u32) -> Self {
         DirtyRect { x0, y0, x1, y1 }
     }
 
-    /// Compute union of two dirty rects (smallest rect containing both)
+    /// compute union of two dirty rects (smallest rect containing both)
     #[inline]
     pub fn union(self, other: DirtyRect) -> DirtyRect {
         DirtyRect {

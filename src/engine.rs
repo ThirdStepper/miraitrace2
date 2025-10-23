@@ -17,6 +17,7 @@ pub struct Engine {
     pub genome: Genome,
     pub current_rgba: Vec<u8>, // premultiplied RGBA (tiny-skia's native format) - unpremul lazily for UI
     pub current_fitness: f64,  // SAD fitness (lower is better)
+    pub baseline_fitness: f64, // For percent normalization (initial error)
     target_rgba: Vec<u8>,      // premultiplied RGBA (for fitness)
     target_unpremul: Vec<u8>,  // unpremultiplied RGBA (for color sampling / analysis)
     target_pyr: GaussianPyramid, // Multi-resolution pyramid (1/4x, 1/2x, 1x) for coarse-to-fine fitness
@@ -76,6 +77,7 @@ impl Engine {
         };
 
         let current_fitness = sad_rgb_parallel(&target_rgba, &current_rgba, None);
+        let baseline_fitness = current_fitness;
 
         // Save max_vertices before cfg is moved
         let initial_poly_points = cfg.max_vertices;
@@ -86,6 +88,7 @@ impl Engine {
             genome,
             current_rgba,
             current_fitness,
+            baseline_fitness,
             target_rgba,
             target_unpremul,
             target_pyr,
@@ -320,7 +323,7 @@ impl Engine {
             return;
         }
 
-        let fitness_pct = self.fitness_percent();
+        let fitness_pct = self.fitness_percent_normalized();
 
         use crate::settings::AutofocusMode;
         match self.autofocus_mode {
@@ -625,7 +628,7 @@ impl Engine {
         // This allows parameters to adapt quickly without expensive tile recomputation
 
         // Get current fitness for adaptive threshold scaling
-        let fitness_pct = self.fitness_percent();
+        let fitness_pct = self.fitness_percent_normalized();
 
         // Compute tile errors using current_premul (kept in sync with current_rgba)
         // Dispatch to appropriate algorithm based on mode
@@ -1045,13 +1048,22 @@ impl Engine {
     }
 
     /// Get current fitness as a percentage (0-100, higher is better)
-    pub fn fitness_percent(&self) -> f32 {
-        profiling::scope!("fitness_percent");
-        let w = self.genome.width as u64;
-        let h = self.genome.height as u64;
-        // Use 4 channels (RGBA) to match sad_rgb_parallel computation
-        let worst_fitness = w * h * 4u64 * 255u64;
-        (100.0 - (self.current_fitness / worst_fitness as f64 * 100.0)) as f32
+    /// Normalized by the *actual* starting error (blank canvas vs target).
+    pub fn fitness_percent_normalized(&self) -> f32 {
+        profiling::scope!("fitness_percent_normalized");
+        let denom = self.baseline_fitness.max(std::f64::EPSILON);
+        let pct = (1.0 - (self.current_fitness / denom)) * 100.0;
+        pct.clamp(0.0, 100.0) as f32
+    }
+
+    /// Reuse the same normalization without needing &self.
+    /// Pass any `current` error alongside the known `baseline`.
+    #[inline]
+    pub fn fitness_percent_from_baseline(baseline: f64, current: f64) -> f32 {
+        profiling::scope!("fitness_percent_normalized");
+        let denom = if baseline > 0.0 { baseline } else { std::f64::EPSILON };
+        let pct = (1.0 - (current / denom)) * 100.0;
+        pct.clamp(0.0, 100.0) as f32
     }
 
     /// Generate a random mutation and return a candidate genome with fitness + render

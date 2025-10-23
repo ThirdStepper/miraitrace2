@@ -2,16 +2,16 @@ use tiny_skia as sk;
 use crate::dna::{Genome, Polygon};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
-// Global anti-aliasing setting (can be changed from settings UI)
+// global anti-aliasing setting (can be changed from settings UI)
 static POLYGON_ANTIALIASING: AtomicBool = AtomicBool::new(true);
 
-/// Update the polygon anti-aliasing setting (called from settings UI)
+/// update the polygon anti-aliasing setting (called from settings UI)
 pub fn set_polygon_antialiasing(enabled: bool) {
     POLYGON_ANTIALIASING.store(enabled, Ordering::Relaxed);
 }
 
-// Scratch pixmap reused across calls to avoid allocations.
-// Lives at module scope so it's shared within this module.
+// scratch pixmap reused across calls to avoid allocations.
+// lives at module scope so it's shared within this module.
 thread_local! {
     static SCRATCH_PIX: std::cell::RefCell<Option<sk::Pixmap>> =
         std::cell::RefCell::new(None);
@@ -23,25 +23,24 @@ thread_local! {
 pub struct CpuRenderer;
 
 impl CpuRenderer {
-    /// Full-frame render to premultiplied RGBA (tiny-skia's native format).
-    /// This is zero-copy - just returns the pixmap's internal buffer.
-    /// egui supports premultiplied format natively, so no conversion needed.
+    /// full-frame render to premultiplied RGBA (tiny-skia's native format).
+    /// this is zero-copy - just returns the pixmap's internal buffer.
     pub fn render_rgba_premul(genome: &Genome) -> Vec<u8> {
         profiling::scope!("render_rgba_premul");
         let w = genome.width;
         let h = genome.height;
         let mut pix = sk::Pixmap::new(w, h).expect("pixmap");
-        // White background (classic Evolve-style)
+        // white background (classic Evolve-style)
         pix.fill(sk::Color::from_rgba(1.0, 1.0, 1.0, 1.0).unwrap());
 
         for poly in &genome.polys {
             draw_polygon(&mut pix, poly, sk::Transform::identity());
         }
-        // Return premultiplied data directly (zero-copy, no conversion)
+        // return premultiplied data directly (zero-copy, no conversion)
         pix.data().to_vec()
     }
 
-    // === New: render only up-to index, returning PREMULTIPLIED RGBA once ===
+    //render only up-to index, returning premultiplied RGBA once
     pub fn render_up_to_poly_premul(genome: &Genome, up_to_index: usize) -> Vec<u8> {
         profiling::scope!("render_up_to_poly_premul");
     
@@ -49,20 +48,20 @@ impl CpuRenderer {
         let h = genome.height;
     
         let mut pix = sk::Pixmap::new(w, h).expect("pixmap");
-        // White background (classic Evolve)
+        // white background
         pix.fill(sk::Color::from_rgba(1.0, 1.0, 1.0, 1.0).unwrap());
     
         for i in 0..up_to_index.min(genome.polys.len()) {
             draw_polygon(&mut pix, &genome.polys[i], sk::Transform::identity());
         }
     
-        // tiny-skia stores PREMULTIPLIED bytes internally:
+        // tiny-skia stores premultiplied bytes internally:
         pix.data().to_vec()
     }
 
-    // === FAST PREMULT version: render from index onto base, return PREMULT ===
-    // Returns premultiplied directly for use in optimization hot path
-    // Also reuses output Vec to eliminate allocation overhead
+    // render from index onto base
+    // returns premultiplied directly for use in optimization hot path
+    // also reuses output Vec to eliminate allocation overhead
     pub fn render_from_poly_on_base_premul_fast(
         genome: &Genome,
         from_index: usize,
@@ -94,7 +93,7 @@ impl CpuRenderer {
                     draw_polygon(pix, &genome.polys[i], sk::Transform::identity());
                 }
 
-                // Move out the Vec with zero-copy instead of cloning (Perf A)
+                // move out the Vec with zero-copy instead of cloning (Perf A)
                 let mut vec_borrow = vec_cell.borrow_mut();
                 vec_borrow.clear();
                 vec_borrow.extend_from_slice(pix.data());
@@ -112,7 +111,7 @@ fn draw_polygon(pix: &mut sk::Pixmap, poly: &Polygon, transform: sk::Transform) 
         return;
     }
 
-    // Quick reject: integer bbox fully outside the pixmap
+    // quick reject: integer bbox fully outside the pixmap
     let (w, h) = (pix.width(), pix.height());
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;
@@ -128,10 +127,10 @@ fn draw_polygon(pix: &mut sk::Pixmap, poly: &Polygon, transform: sk::Transform) 
         return; // fully off-screen: skip tiny-skia work
     }
 
-    // Use cached path with lock-free reads (OnceLock - Perf C)
+    // use cached path with lock-free reads
     // get_or_init populates cache on first call, subsequent calls are lock-free
     let path = poly.cached_path.get_or_init(|| {
-        // Build path once, never rebuild (vertices are immutable after creation)
+        // build path once, never rebuild (vertices are immutable after creation)
         let mut pb = sk::PathBuilder::new();
         pb.move_to(poly.points[0].0, poly.points[0].1);
         for i in 1..poly.points.len() {
@@ -150,7 +149,7 @@ fn draw_polygon(pix: &mut sk::Pixmap, poly: &Polygon, transform: sk::Transform) 
     pix.fill_path(path, &paint, fill_rule, transform, None);
 }
 
-/// Premultiply RGBA - optimized scalar implementation (compiler will auto-vectorize)
+/// premultiply RGBA - optimized scalar implementation (compiler will auto-vectorize)
 #[inline(always)]
 pub fn premultiply(p: &[u8]) -> Vec<u8> {
     profiling::scope!("premultiply");

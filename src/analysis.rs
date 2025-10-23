@@ -2,13 +2,13 @@ use crate::fitness::sad_rgb_rect;
 use crate::app::FocusRegion;
 use rayon::prelude::*;
 
-/// Find the dominant color in an image (matches Evolve's analysis.cpp).
-/// Uses a quantized color space to find the most common color region,
+/// find the dominant color in an image (matches Evolve's analysis.cpp).
+/// uses a quantized color space to find the most common color region,
 /// then averages all pixels in that region.
 pub fn find_dominant_color(rgba: &[u8]) -> [f32; 3] {
     profiling::scope!("find_dominant_color");
-    // First only keep the 3 highest bits of each channel (R, G, B)
-    // Find the most common colors that all have the same 3 bits for each channel
+    // first only keep the 3 highest bits of each channel (R, G, B)
+    // find the most common colors that all have the same 3 bits for each channel
     let mut map1 = [[[0u64; 8]; 8]; 8];
 
     for i in (0..rgba.len()).step_by(4) {
@@ -23,7 +23,7 @@ pub fn find_dominant_color(rgba: &[u8]) -> [f32; 3] {
         map1[r_bin][g_bin][b_bin] += 1;
     }
 
-    // Find the bin with the most pixels
+    // find the bin with the most pixels
     let mut best_r = 0;
     let mut best_g = 0;
     let mut best_b = 0;
@@ -42,7 +42,7 @@ pub fn find_dominant_color(rgba: &[u8]) -> [f32; 3] {
         }
     }
 
-    // Now out of all the colors with those 3 high bits, take the average
+    // now out of all the colors with those 3 high bits, take the average
     let mut avg_r = 0u64;
     let mut avg_g = 0u64;
     let mut avg_b = 0u64;
@@ -68,17 +68,14 @@ pub fn find_dominant_color(rgba: &[u8]) -> [f32; 3] {
             (avg_b / count) as f32 / 255.0,
         ]
     } else {
-        [1.0, 1.0, 1.0] // Default to white if nothing found
+        [1.0, 1.0, 1.0] // default to white if nothing found
     }
 }
 
-/// Subdivide image into NxN grid and compute error (SAD) for each tile.
-/// Returns Vec of (tile_index, sad_error, focus_region) sorted by error (worst first).
-/// Matches Evolve's computeAutofocusFitness (widget.cpp:96-144).
-///
-/// NEW: Computes tile errors in parallel across all CPU cores for faster autofocus updates.
-///
-/// This enables adaptive autofocus: evolution concentrates on tiles with highest error.
+/// subdivide image into NxN grid and compute error (SAD) for each tile.
+/// returns Vec of (tile_index, sad_error, focus_region) sorted by error (worst first).
+/// matches Evolve's computeAutofocusFitness (widget.cpp:96-144).
+/// this enables adaptive autofocus: evolution concentrates on tiles with highest error.
 pub fn compute_tile_errors(
     target_premul: &[u8],
     current_premul: &[u8],
@@ -94,7 +91,7 @@ pub fn compute_tile_errors(
 
     let num_tiles = (grid_size * grid_size) as usize;
 
-    // Compute tile errors in parallel
+    // compute tile errors in parallel
     let mut tiles: Vec<(usize, f64, FocusRegion)> = (0..num_tiles)
         .into_par_iter()
         .map(|tile_idx| {
@@ -108,7 +105,7 @@ pub fn compute_tile_errors(
             let tile_w = (x_max + 1).saturating_sub(x_min).max(1);
             let tile_h = (y_max + 1).saturating_sub(y_min).max(1);
 
-            // Compute SAD for this tile
+            // compute SAD for this tile
             let sad = sad_rgb_rect(
                 target_premul,
                 current_premul,
@@ -117,10 +114,10 @@ pub fn compute_tile_errors(
                 x_max,
                 y_max,
                 width,
-                None, // No early-exit: need accurate tile errors for autofocus
+                None, // no early-exit: need accurate tile errors for autofocus
             );
 
-            // Create FocusRegion for this tile (normalized coordinates 0.0-1.0)
+            // create FocusRegion for this tile (normalized coordinates 0.0-1.0)
             let focus_region = FocusRegion::new(
                 x_min as f32 / width as f32,
                 (x_min + tile_w) as f32 / width as f32,
@@ -132,18 +129,17 @@ pub fn compute_tile_errors(
         })
         .collect();
 
-    // Sort by error (highest error first = worst tile first)
+    // sort by error (highest error first = worst tile first)
     tiles.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     tiles
 }
 
-/// Dispatcher for different autofocus algorithms
-///
+/// dispatcher for different autofocus algorithms
 /// Based on the mode, this dispatches to:
-/// - UniformGrid: Regular NxN grid (classic)
-/// - Quadtree: Recursive 4-way subdivision (adaptive)
-/// - BSPTree: Binary space partitioning (aggressive)
+/// - UniformGrid: regular NxN grid (classic)
+/// - Quadtree: recursive 4-way subdivision (adaptive)
+/// - BSPTree: binary space partitioning (aggressive)
 pub fn compute_tile_errors_by_mode(
     target_premul: &[u8],
     current_premul: &[u8],
@@ -159,7 +155,7 @@ pub fn compute_tile_errors_by_mode(
 
     match mode {
         AutofocusMode::UniformGrid => {
-            // Use existing uniform grid implementation
+            // use existing uniform grid implementation
             compute_tile_errors(target_premul, current_premul, width, height, grid_size)
         }
         AutofocusMode::Quadtree => {
@@ -175,8 +171,8 @@ pub fn compute_tile_errors_by_mode(
             )
         }
         AutofocusMode::BSPTree => {
-            // Binary space partitioning - grid_size directly stores max_tiles (not a dimension)
-            // Note: Unlike UniformGrid which uses grid_size as dimension (N×N), BSP stores tile count directly
+            // binary space partitioning - grid_size directly stores max_tiles (not a dimension)
+            // note: unlike UniformGrid which uses grid_size as dimension (N×N), BSP stores tile count directly
             let max_tiles = grid_size;
             crate::autofocus::compute_tiles_bsp(
                 target_premul,

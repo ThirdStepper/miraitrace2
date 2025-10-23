@@ -230,7 +230,6 @@ impl AppSettings {
             p_reorder: self.p_reorder,
             p_move_point: self.p_move_point,
             pos_sigma: 10.0,  // Not exposed in UI (random mutations)
-            col_sigma: 0.08,  // Not exposed in UI
             color_step: self.color_step,
             pos_step: self.pos_step,
             min_tris: self.min_tris,

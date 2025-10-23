@@ -3,34 +3,29 @@ use serde::{Deserialize, Serialize};
 use crate::app::FocusRegion;
 use std::sync::{Arc, OnceLock};
 
-/// A polygon with 3-6 points (matching original Evolve's progressive detail)
-#[derive(Debug, Serialize, Deserialize)]  // Removed Clone - implemented manually below
+/// a polygon with 3-6 points and color stored as un-premultiplied. also caches a T-S path
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Polygon {
     pub points: Vec<(f32, f32)>,  // 3-6 vertex coordinates
     pub rgba: [f32; 4],            // un-premultiplied, 0..1
 
-    // Cached tiny-skia Path (not serialized, rebuilt on load)
-    // Uses OnceLock for lock-free reads after first initialization (Perf C)
-    // Path becomes immutable after first computation - vertex changes create new Polygon
     #[serde(skip)]
     pub cached_path: OnceLock<Arc<tiny_skia::Path>>,
 }
 
-// Manual Clone implementation that resets cached_path to empty OnceLock
-// This prevents stale paths from being copied when Arc::make_mut() clones polygons
+// this way stale paths won't be copied if the polygon is cloned.
 impl Clone for Polygon {
     fn clone(&self) -> Self {
         Self {
             points: self.points.clone(),
             rgba: self.rgba,
-            cached_path: OnceLock::new(),  // Always start fresh - never copy cached paths
+            cached_path: OnceLock::new(),
         }
     }
 }
 
+/// only function is to check if any vertex of this polygon intersects the given focus region
 impl Polygon {
-    /// Check if any vertex of this polygon intersects the given focus region
-    /// (matching Evolve's Poly::hasPointIn method)
     pub fn intersects_region(&self, region: &FocusRegion, width: u32, height: u32) -> bool {
         profiling::scope!("intersects_region");
         let x_min = (width as f32 * region.left) as f32;
@@ -44,15 +39,15 @@ impl Polygon {
     }
 }
 
+// arc wrapper enables copy-on-write: cloning genome only copies pointers (8 bytes/each),
+// not entire polygons. mutations use Arc::make_mut() to clone only modified polygons.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Genome {
     pub width: u32,
     pub height: u32,
-    // Arc wrapper enables copy-on-write: cloning genome only copies pointers (8 bytes each),
-    // not entire polygons. Mutations use Arc::make_mut() to clone only modified polygons.
-    // This reduces memory overhead from ~6MB per clone to ~800KB (87% reduction at 100k polys)
+
     #[serde(with = "arc_vec_serde")]
-    pub polys: Vec<Arc<Polygon>>,  // Changed from Vec<Polygon> to enable efficient cloning
+    pub polys: Vec<Arc<Polygon>>,
 }
 
 impl Genome {
@@ -61,7 +56,7 @@ impl Genome {
         Self { width, height, polys: Vec::new() }
     }
 
-    /// Generate a polygon constrained to a specific focus region (matching Evolve's genPoly with focus)
+    /// generate a polygon constrained to a specific focus region
     pub fn smart_polygon_in_region<R: Rng>(
         &self,
         rng: &mut R,
@@ -76,7 +71,7 @@ impl Genome {
         let w = self.width as f32;
         let h = self.height as f32;
 
-        // Determine bounds based on region
+        // determine bounds based on region
         let (x_min, x_max, y_min, y_max) = if let Some(r) = region {
             (w * r.left, w * r.right, h * r.top, h * r.bottom)
         } else {
@@ -86,7 +81,7 @@ impl Genome {
         let width_range = x_max - x_min;
         let height_range = y_max - y_min;
 
-        // Generate random points within the region
+        // generate random points within the region
         let mut points = Vec::with_capacity(num_points);
         for _ in 0..num_points {
             let x = x_min + rng.random::<f32>() * width_range;
@@ -94,11 +89,10 @@ impl Genome {
             points.push((x, y));
         }
 
-        // Validate geometry if enforcement is enabled
         if enforce_simple_convex {
-            // Try to sanitize (ensures CCW + validates simple + convex)
+            // try to sanitize (ensures CCW + validates simple + convex)
             if !crate::geom::sanitize_ccw_simple_convex(&mut points) {
-                // Fallback: sort by angle around centroid to create a proper convex polygon
+                // fallback: sort by angle around centroid to create a proper convex polygon
                 let cx = points.iter().map(|p| p.0).sum::<f32>() / points.len() as f32;
                 let cy = points.iter().map(|p| p.1).sum::<f32>() / points.len() as f32;
                 points.sort_by(|a, b| {
@@ -107,16 +101,16 @@ impl Genome {
                     angle_a.partial_cmp(&angle_b).unwrap_or(std::cmp::Ordering::Equal)
                 });
 
-                // Retry sanitization after angle-sort (should now be valid)
+                // retry sanitization after angle-sort (should now be valid)
                 crate::geom::sanitize_ccw_simple_convex(&mut points);
             }
         }
 
-        // Compute center of polygon
+        // compute center of polygon
         let cx = (points.iter().map(|p| p.0).sum::<f32>() / num_points as f32).clamp(0.0, w - 1.0) as u32;
         let cy = (points.iter().map(|p| p.1).sum::<f32>() / num_points as f32).clamp(0.0, h - 1.0) as u32;
 
-        // Sample 5 points: center, top, bottom, left, right (matching Evolve)
+        // sample 5 points: center, top, bottom, left, right (matching Evolve)
         let samples = [
             (cx, cy),
             (cx, cy.saturating_sub(5)),                 // top
@@ -153,8 +147,7 @@ impl Genome {
     }
 }
 
-// Serde helper module for serializing/deserializing Vec<Arc<T>>
-// Arc is transparent for serialization - we serialize the inner value directly
+// serde helper module for serializing/deserializing Vec<Arc<T>>. we serialize the inner value directly
 mod arc_vec_serde {
     use super::*;
     use serde::de::{Deserialize, Deserializer, SeqAccess, Visitor};

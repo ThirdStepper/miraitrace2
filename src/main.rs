@@ -10,14 +10,12 @@ mod settings;
 mod geom;
 
 fn main() -> eframe::Result<()> {
-    // Configure Rayon's *global* pool once at startup so worker threads get nice names
-    // like "rayon-0", "rayon-1", … (harmless no-op if something already built it).
+    // configure Rayon's global thread pool once at startup so worker threads get nice names like "rayon-0".
     let _ = rayon::ThreadPoolBuilder::new()
         .thread_name(|i| format!("rayon-{i}"))
         .build_global();
 
-    // Tracy profiling is always-on when compiled with profile-with-tracy feature
-    // Zero overhead when Tracy GUI is not connected
+    // tracy profiling is always-on when compiled with profile-with-tracy feature
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
         "MiraiTrace2",
