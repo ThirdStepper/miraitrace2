@@ -175,8 +175,9 @@ pub fn compute_tile_errors_by_mode(
             )
         }
         AutofocusMode::BSPTree => {
-            // Binary space partitioning - use grid_size² as max_tiles limit
-            let max_tiles = grid_size * grid_size;
+            // Binary space partitioning - grid_size directly stores max_tiles (not a dimension)
+            // Note: Unlike UniformGrid which uses grid_size as dimension (N×N), BSP stores tile count directly
+            let max_tiles = grid_size;
             crate::autofocus::compute_tiles_bsp(
                 target_premul,
                 current_premul,

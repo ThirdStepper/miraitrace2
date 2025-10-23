@@ -290,7 +290,8 @@ fn compute_auto_threshold(
             let max_error = errors.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
             // Multiplier = fraction of max error to use as threshold
-            // Higher fitness = lower multiplier = lower threshold = more subdivision
+            // Higher multiplier = higher threshold = more subdivision before stopping
+            // Lower fitness = higher multiplier to allow more adaptive subdivision early on
             let multiplier = if fitness_percent >= 95.0 {
                 0.3   // 95-100%: Keep splitting until worst tile reaches 30% of max
             } else if fitness_percent >= 90.0 {
@@ -302,9 +303,9 @@ fn compute_auto_threshold(
             } else if fitness_percent >= 80.0 {
                 0.6   // 80-85%
             } else if fitness_percent >= 70.0 {
-                0.65  // 70-80%
+                0.7   // 70-80%: More aggressive early subdivision
             } else {
-                0.75  // 0-70%: Conservative - stop at 75% of max error
+                0.85  // 0-70%: Very aggressive - keep splitting until worst tile reaches 85% of max error
             };
 
             max_error * multiplier
@@ -321,12 +322,14 @@ fn compute_auto_threshold(
                 .sum::<f64>() / errors.len() as f64;
             let stddev = variance.sqrt();
 
+            // Lower multiplier = lower threshold = more aggressive subdivision
+            // Use lower multipliers at low fitness to encourage adaptive subdivision early
             let multiplier = if fitness_percent >= 95.0 {
-                0.3   // 95-100%: More aggressive than default
+                0.3   // 95-100%: Very aggressive
             } else if fitness_percent >= 85.0 {
-                0.4   // 85-95%: Slightly more aggressive
+                0.4   // 85-95%: Aggressive
             } else {
-                0.5   // 0-85%: Original behavior
+                0.3   // 0-85%: Very aggressive to promote early adaptive subdivision
             };
 
             mean + multiplier * stddev

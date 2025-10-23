@@ -257,7 +257,7 @@ impl Engine {
     /// Backloaded: depth grows exponentially (each level = 4× more potential tiles)
     fn compute_progressive_quadtree_depth(fitness_percent: f32) -> u32 {
         // Backloaded schedule: most stages in high fitness range
-        // Depth 2-6 (5 stages total)
+        // Depth 2-6 (5 stages total) - adjusted for better early subdivision
         if fitness_percent >= 97.0 {
             6  // 97-100%: depth 6 (up to 4096 tiles, maximum detail)
         } else if fitness_percent >= 94.0 {
@@ -266,8 +266,10 @@ impl Engine {
             4  // 90-94%: depth 4 (up to 256 tiles, fine)
         } else if fitness_percent >= 85.0 {
             3  // 85-90%: depth 3 (up to 64 tiles, medium)
+        } else if fitness_percent >= 70.0 {
+            3  // 70-85%: depth 3 (up to 64 tiles, better early subdivision)
         } else {
-            2  // 0-85%: depth 2 (up to 16 tiles, fast early evolution)
+            2  // 0-70%: depth 2 (up to 16 tiles, fast early evolution)
         }
     }
 
