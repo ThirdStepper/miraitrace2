@@ -7,6 +7,7 @@ mod engine;
 mod analysis;
 mod autofocus;
 mod settings;
+mod geom;
 
 fn main() -> eframe::Result<()> {
     // Configure Rayon's *global* pool once at startup so worker threads get nice names

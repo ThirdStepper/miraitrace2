@@ -150,6 +150,7 @@ pub fn compute_tiles_bsp(
     let error = compute_region_error(target, current, width, height, &full_region);
 
     let mut tiles = vec![(0, error, full_region)];
+    let mut next_id: usize = 1;
 
     // Keep splitting worst tile until we hit max_tiles
     while tiles.len() < max_tiles as usize {
@@ -201,10 +202,10 @@ pub fn compute_tiles_bsp(
         let error1 = compute_region_error(target, current, width, height, &tile1);
         let error2 = compute_region_error(target, current, width, height, &tile2);
 
-        // Add new tiles with sequential indices
-        let next_idx = tiles.iter().map(|(i, _, _)| *i).max().unwrap_or(0) + 1;
-        tiles.push((next_idx, error1, tile1));
-        tiles.push((next_idx + 1, error2, tile2));
+        // Add new tiles with sequential indices (using monotonic counter)
+        tiles.push((next_id, error1, tile1));
+        tiles.push((next_id + 1, error2, tile2));
+        next_id += 2;
     }
 
     // Sort by error (worst first)
@@ -232,15 +233,16 @@ fn compute_region_error(
     let x_max = ((region.right * width as f32) as u32).min(width - 1);
     let y_max = ((region.bottom * height as f32) as u32).min(height - 1);
 
-    sad_rgb_rect(target, current, x_min, y_min, x_max, y_max, width)
+    sad_rgb_rect(target, current, x_min, y_min, x_max, y_max, width, None)
 }
 
-/// Check if region is too small to subdivide (< 32 pixels in any dimension)
+/// Check if region is too small to subdivide (relative minimum with 32px floor)
 fn is_region_too_small(region: &FocusRegion, width: u32, height: u32) -> bool {
-    let w = ((region.right - region.left) * width as f32) as u32;
-    let h = ((region.bottom - region.top) * height as f32) as u32;
-
-    w < 32 || h < 32
+    let w = ((region.right - region.left) * width as f32).round() as u32;
+    let h = ((region.bottom - region.top) * height as f32).round() as u32;
+    // Minimum is max(32px, ~1/64 of image on the short side)
+    let rel_min = (width.min(height) / 64).max(32);
+    w < rel_min || h < rel_min
 }
 
 /// Automatically compute a reasonable error threshold for adaptive subdivision
@@ -263,25 +265,20 @@ fn compute_auto_threshold(
 ) -> f64 {
     profiling::scope!("compute_auto_threshold");
 
-    // Quick sampling: compute errors for 4×4 grid in parallel
-    let sample_grid_size = 4;
-    let tile_width = width / sample_grid_size;
-    let tile_height = height / sample_grid_size;
-
-    let errors: Vec<f64> = (0..sample_grid_size)
+    // Quick sampling: compute errors for 4×4 grid in parallel (flattened to single parallel loop)
+    let g = 4u32;
+    let tw = (width / g).max(1);
+    let th = (height / g).max(1);
+    let errors: Vec<f64> = (0..(g * g))
         .into_par_iter()
-        .flat_map(|tile_y| {
-            (0..sample_grid_size)
-                .into_par_iter()
-                .map(move |tile_x| {
-                    let x_min = tile_x * tile_width;
-                    let y_min = tile_y * tile_height;
-                    let x_max = ((tile_x + 1) * tile_width).min(width) - 1;
-                    let y_max = ((tile_y + 1) * tile_height).min(height) - 1;
-
-                    sad_rgb_rect(target, current, x_min, y_min, x_max, y_max, width)
-                })
-                .collect::<Vec<_>>()
+        .map(|i| {
+            let tx = i % g;
+            let ty = i / g;
+            let x_min = tx * tw;
+            let y_min = ty * th;
+            let x_max = ((tx + 1) * tw).min(width) - 1;
+            let y_max = ((ty + 1) * th).min(height) - 1;
+            sad_rgb_rect(target, current, x_min, y_min, x_max, y_max, width, None)
         })
         .collect();
 

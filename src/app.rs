@@ -2,6 +2,45 @@ use eframe::egui::{self, ColorImage, Image, TextureHandle, TextureOptions};
 use crate::engine::Engine;
 use std::sync::{mpsc::{self, Receiver, Sender}, Arc};
 use std::thread;
+use std::time::Instant;
+
+/// UI upload throttling to reduce GPU bandwidth and improve performance on large images
+/// Counter interval is tied to gui_update_rate (multiplier: 25×)
+struct UiUploadGate {
+    last_upload: Instant,
+    counter: u32,
+    min_interval_ms: u128,  // Minimum time between uploads (default: 150ms)
+    counter_interval: u32,  // Upload every Nth update (calculated from gui_update_rate × 25)
+}
+
+impl UiUploadGate {
+    fn new(gui_update_rate: u32) -> Self {
+        Self {
+            last_upload: Instant::now(),
+            counter: 0,
+            min_interval_ms: 10,
+            counter_interval: gui_update_rate * 10,  // Tied to gui_update_rate
+        }
+    }
+
+    /// Update counter interval when gui_update_rate changes
+    fn update_gui_rate(&mut self, gui_update_rate: u32) {
+        self.counter_interval = gui_update_rate * 25;
+    }
+
+    /// Check if we should upload this frame (time-based OR counter-based)
+    fn should_upload(&mut self) -> bool {
+        self.counter += 1;
+        let elapsed = self.last_upload.elapsed().as_millis();
+
+        if elapsed >= self.min_interval_ms || self.counter % self.counter_interval == 0 {
+            self.last_upload = Instant::now();
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// Focus region for targeted evolution (normalized coordinates 0.0-1.0)
 #[derive(Clone, Copy, Debug)]
@@ -86,6 +125,9 @@ pub struct MiraiApp {
     autofocus_active_region: Option<FocusRegion>,  // Region currently being used by engine (from autofocus)
     autofocus_active_indices: Option<Vec<usize>>,  // Which tile indices are active
 
+    // UI upload throttling for large images (150ms or every 100 updates)
+    upload_gate: UiUploadGate,
+
     // Profiler UI state
     #[cfg(feature = "profile-with-tracy")]
     show_tracy_info: bool,
@@ -120,6 +162,7 @@ impl MiraiApp {
             autofocus_tiles: None,
             autofocus_active_region: None,
             autofocus_active_indices: None,
+            upload_gate: UiUploadGate::new(settings.gui_update_rate),
             #[cfg(feature = "profile-with-tracy")]
             show_tracy_info: false,
             show_settings: false,
@@ -227,8 +270,8 @@ impl MiraiApp {
                             let current_generation = engine.generation;
 
                             let mut update_callback = |_genome: &crate::dna::Genome, rgba: &[u8], fitness_val: f64, _improved: bool| {
-                                // Calculate fitness percentage
-                                let worst_fitness = (w as u64) * (h as u64) * 3u64 * 255u64;
+                                // Calculate fitness percentage (4 channels RGBA to match sad_rgb_parallel)
+                                let worst_fitness = (w as u64) * (h as u64) * 4u64 * 255u64;
                                 let fitness_percent = (100.0 - (fitness_val / worst_fitness as f64 * 100.0)) as f32;
 
                                 // Send incremental update (throttled by counter in optimization functions)
@@ -305,10 +348,42 @@ impl MiraiApp {
     }
 
     /// Update the "current" texture from received RGBA data (accepts Arc to avoid copies)
+    /// Uses preview downscaling: keeps internal full-res, downscales to ~600px wide for GPU upload
     fn update_current_texture(&mut self, ctx: &egui::Context, rgba: &Arc<[u8]>) {
         profiling::scope!("update_current_texture");
         let [w, h] = self.target_dims;
-        let img = ColorImage::from_rgba_premultiplied([w, h], rgba.as_ref());
+
+        // Downscale threshold: if image is > 1000px wide, downscale preview to ~600px
+        const PREVIEW_TARGET_WIDTH: u32 = 600;
+        const DOWNSCALE_THRESHOLD: u32 = 1000;
+
+        let (preview_w, preview_h, preview_data) = if w as u32 > DOWNSCALE_THRESHOLD {
+            // Downscale for preview (4× bandwidth reduction at 1200px width)
+            let scale = PREVIEW_TARGET_WIDTH as f32 / w as f32;
+            let new_w = PREVIEW_TARGET_WIDTH;
+            let new_h = (h as f32 * scale).max(1.0) as u32;
+
+            // Use image crate for fast bilinear resize
+            let img_buf = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+                w as u32,
+                h as u32,
+                rgba.to_vec(), // Convert Arc<[u8]> to Vec<u8>
+            ).expect("Failed to create image buffer");
+
+            let resized = image::imageops::resize(
+                &img_buf,
+                new_w,
+                new_h,
+                image::imageops::FilterType::Triangle, // Fast bilinear-like filter
+            );
+
+            (new_w as usize, new_h as usize, resized.into_raw())
+        } else {
+            // Small image: no downscaling needed
+            (w, h, rgba.to_vec())
+        };
+
+        let img = ColorImage::from_rgba_premultiplied([preview_w, preview_h], &preview_data);
 
         if let Some(tex) = self.current_tex.as_mut() {
             tex.set(img, TextureOptions::LINEAR);
@@ -452,9 +527,17 @@ impl MiraiApp {
         }
 
         let rect = response.rect;
-        let max_error = tiles[0].1;  // First tile has worst error (sorted)
+        let max_error = tiles[0].1.max(1.0);  // First tile has worst error (sorted), avoid div-by-zero when all tiles are perfect
 
-        for (idx, sad_error, region) in tiles {
+        // Build a fast lookup for active positions (they are positions in the *sorted* array)
+        let mut is_active = vec![false; tiles.len()];
+        if let Some(active) = &self.autofocus_active_indices {
+            for &p in active {
+                if p < is_active.len() { is_active[p] = true; }
+            }
+        }
+
+        for (pos, (/*tile_id*/_, sad_error, region)) in tiles.iter().enumerate() {
             // Convert normalized region coords to screen coords
             let x1 = rect.min.x + region.left * tex_size.x * scale;
             let y1 = rect.min.y + region.top * tex_size.y * scale;
@@ -477,13 +560,7 @@ impl MiraiApp {
             if self.settings.autofocus_show_tiles {
                 // Check if this tile is actually being used by the engine (using active_indices)
                 // This correctly highlights multi-tile and probabilistic modes
-                let is_focused = self.autofocus_active_indices.as_ref()
-                    .map(|indices| {
-                        // Check if current tile's position in sorted list is in active indices
-                        let tile_position = tiles.iter().position(|(tid, _, _)| tid == idx).unwrap_or(usize::MAX);
-                        indices.contains(&tile_position)
-                    })
-                    .unwrap_or(false);
+                let is_focused = is_active.get(pos).copied().unwrap_or(false);
 
                 let stroke = if is_focused {
                     egui::Stroke::new(3.0, egui::Color32::RED)  // Highlight active tiles with thick red border
@@ -496,7 +573,7 @@ impl MiraiApp {
     }
 
     /// Process updates from the background engine thread
-    /// Applies all available updates immediately (no throttling) to show smooth incremental progress
+    /// Uses throttled texture uploads (150ms OR every 100 updates) to reduce GPU bandwidth on large images
     fn poll_engine_updates(&mut self, ctx: &egui::Context) {
         profiling::scope!("poll_engine_updates");
         if let Some(rx) = &self.update_rx {
@@ -511,7 +588,11 @@ impl MiraiApp {
                 self.generation = update.generation;
                 self.fitness = update.fitness;
                 self.triangles = update.triangles;
-                self.update_current_texture(ctx, &update.current_rgba);
+
+                // Throttled texture upload: only upload if enough time has elapsed OR counter threshold reached
+                if self.upload_gate.should_upload() {
+                    self.update_current_texture(ctx, &update.current_rgba);
+                }
 
                 // Update autofocus tile data if present (sent when autofocus re-evaluates)
                 if update.autofocus_tiles.is_some() {
@@ -530,6 +611,54 @@ impl MiraiApp {
             .resizable(true)
             .default_width(450.0)
             .show(ctx, |ui| {
+                // Apply, Save, and Reset buttons at the top
+                ui.horizontal(|ui| {
+                    if ui.button("Apply Settings").on_hover_text("Apply changes to current session").clicked() {
+                        // Apply settings to global state immediately (GUI rate & AA only)
+                        crate::mutate::set_gui_update_rate(self.settings.gui_update_rate);
+                        crate::render::set_polygon_antialiasing(self.settings.polygon_antialiasing);
+
+                        // Update UI upload gate to sync with new gui_update_rate (counter_interval = rate × 25)
+                        self.upload_gate.update_gui_rate(self.settings.gui_update_rate);
+
+                        // Apply autofocus settings to running engine immediately
+                        if let Some(tx) = &self.command_tx {
+                            let _ = tx.send(EngineCommand::UpdateAutofocusSettings(
+                                self.settings.autofocus_enabled,
+                                self.settings.autofocus_mode,
+                                self.settings.autofocus_grid_size,
+                                self.settings.autofocus_max_depth,
+                                self.settings.autofocus_error_threshold,
+                                self.settings.autofocus_interval,
+                                self.settings.autofocus_multi_tile_count,
+                                self.settings.autofocus_probabilistic,
+                                self.settings.autofocus_progressive,
+                                self.settings.gui_update_rate,
+                            ));
+                        }
+
+                        // Note: Other settings (mutation probabilities, triangle limits, alpha, steps)
+                        // are captured when creating the engine, so they only apply to new sessions
+                    }
+
+                    if ui.button("Save to Disk").on_hover_text("Save settings permanently (Ctrl+S)").clicked() {
+                        if let Err(e) = self.settings.save() {
+                            eprintln!("Failed to save settings: {}", e);
+                        }
+                    }
+
+                    if ui.button("Reset to Defaults").on_hover_text("Restore default settings").clicked() {
+                        self.settings = crate::settings::AppSettings::default();
+                        crate::mutate::set_gui_update_rate(self.settings.gui_update_rate);
+                        crate::render::set_polygon_antialiasing(self.settings.polygon_antialiasing);
+                        self.upload_gate.update_gui_rate(self.settings.gui_update_rate);
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     // 🎨 Display Settings
                     egui::CollapsingHeader::new(egui::RichText::new("🎨 Display").heading())
@@ -548,6 +677,7 @@ impl MiraiApp {
                                     .suffix(" improvements"));
                             });
                             ui.label("  Lower = more visual feedback, higher = faster optimization");
+                            ui.label("  Also controls texture upload frequency (25× multiplier for throttling)");
                             ui.add_space(5.0);
 
                             // Polygon Anti-aliasing
@@ -726,6 +856,116 @@ impl MiraiApp {
 
                     ui.add_space(10.0);
 
+                    // 🔺 Polygon Shape
+                    egui::CollapsingHeader::new(egui::RichText::new("🔺 Polygon Shape").heading())
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("⟳ Applies to new images")
+                                .color(egui::Color32::from_rgb(200, 150, 100))
+                                .small());
+                            ui.add_space(5.0);
+
+                            // Polygon Arity Mode
+                            ui.horizontal(|ui| {
+                                ui.label("Polygon Vertex Count:");
+                                egui::ComboBox::from_id_salt("polygon_arity_mode")
+                                    .selected_text(format!("{}", match self.settings.polygon_arity_mode {
+                                        crate::settings::PolygonArityMode::Dynamic => "Dynamic (3-6)",
+                                        crate::settings::PolygonArityMode::TriOnly => "Triangles Only (3)",
+                                        crate::settings::PolygonArityMode::QuadOnly => "Quads Only (4)",
+                                        crate::settings::PolygonArityMode::PentaOnly => "Pentagons Only (5)",
+                                        crate::settings::PolygonArityMode::HexaOnly => "Hexagons Only (6)",
+                                    }))
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.settings.polygon_arity_mode,
+                                            crate::settings::PolygonArityMode::Dynamic, "Dynamic (3-6)");
+                                        ui.selectable_value(&mut self.settings.polygon_arity_mode,
+                                            crate::settings::PolygonArityMode::TriOnly, "Triangles Only (3)");
+                                        ui.selectable_value(&mut self.settings.polygon_arity_mode,
+                                            crate::settings::PolygonArityMode::QuadOnly, "Quads Only (4)");
+                                        ui.selectable_value(&mut self.settings.polygon_arity_mode,
+                                            crate::settings::PolygonArityMode::PentaOnly, "Pentagons Only (5)");
+                                        ui.selectable_value(&mut self.settings.polygon_arity_mode,
+                                            crate::settings::PolygonArityMode::HexaOnly, "Hexagons Only (6)");
+                                    });
+                            });
+                            ui.label("  Controls polygon complexity:");
+                            ui.label("  • Dynamic: Progressive reduction (6→5→4→3 as count grows)");
+                            ui.label("  • Fixed: All polygons have exactly N vertices (no drift)");
+                            ui.add_space(10.0);
+                            ui.separator();
+
+                            // Enforce Simple Convex
+                            ui.horizontal(|ui| {
+                                ui.label("Prevent twisted/self-intersecting polygons:");
+                                ui.checkbox(&mut self.settings.enforce_simple_convex, "");
+                            });
+                            ui.label("  Ensures all polygons remain simple, convex, and counter-clockwise");
+                            ui.label("  • Prevents bow-tie artifacts and visual anomalies");
+                            ui.label("  • Improves numerical stability during rendering");
+                            ui.label("  • Negligible performance impact (O(n²) checks with n≤6)");
+                        });
+
+                    ui.add_space(10.0);
+
+                    // ⚡ Fast Fitness Evaluation
+                    egui::CollapsingHeader::new(egui::RichText::new("⚡ Fast Fitness").heading())
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("⟳ Applies to new images")
+                                .color(egui::Color32::from_rgb(200, 150, 100))
+                                .small());
+                            ui.add_space(5.0);
+
+                            // Pyramid Fitness
+                            ui.horizontal(|ui| {
+                                ui.label("Pyramid Fitness (Coarse-to-Fine):");
+                                ui.checkbox(&mut self.settings.use_pyramid_fitness, "");
+                            });
+                            ui.label("  Test at 1/4x → 1/2x → 1x resolution with early abort");
+                            ui.label("  • Faster rejection of bad candidates (2-5x speedup)");
+                            ui.label("  • Minimal quality impact");
+                            ui.add_space(5.0);
+
+                            // Tiled Fitness
+                            ui.horizontal(|ui| {
+                                ui.label("Tiled Fitness (Incremental Cache):");
+                                ui.checkbox(&mut self.settings.use_tiled_fitness, "");
+                            });
+                            ui.label("  Cache per-tile errors and only recompute affected tiles");
+                            ui.label("  • Significant speedup for optimization (10-50%)");
+                            ui.label("  • Tile-wise early exit for faster rejection");
+                            ui.label("  • Negligible quality impact");
+                            ui.add_space(5.0);
+
+                            // Tile Auto-sizing
+                            ui.horizontal(|ui| {
+                                ui.label("Auto Tile Size:");
+                                ui.checkbox(&mut self.settings.tile_auto, "");
+                            });
+                            ui.label("  Automatically compute tile size based on image dimensions");
+                            ui.label("  • ≤0.5MP: 32px tiles (fine granularity)");
+                            ui.label("  • ≤8MP: 64px tiles (balanced, typical 1080p-4K)");
+                            ui.label("  • >8MP: 128px tiles (reduced overhead)");
+                            ui.add_space(5.0);
+
+                            // Manual Tile Size
+                            ui.add_enabled_ui(!self.settings.tile_auto, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("Manual Tile Size:");
+                                    ui.add(egui::Slider::new(&mut self.settings.tile_size, 16..=128)
+                                        .step_by(16.0)
+                                        .text("pixels"));
+                                });
+                                ui.label("  Only used when Auto Tile Size is disabled");
+                                ui.label("  • 32px: fine granularity, higher overhead");
+                                ui.label("  • 64px: balanced (recommended)");
+                                ui.label("  • 128px: coarse, lower overhead");
+                            });
+                        });
+
+                    ui.add_space(10.0);
+
                     // ⚙️ Evolution Parameters
                     egui::CollapsingHeader::new(egui::RichText::new("⚙️ Evolution Parameters").heading())
                         .default_open(false)
@@ -784,6 +1024,23 @@ impl MiraiApp {
                                 ui.add(egui::Slider::new(&mut self.settings.p_move_point, 0.0..=1.0)
                                     .text("probability"));
                             });
+                            ui.add_space(5.0);
+
+                            ui.separator();
+                            ui.label(egui::RichText::new("Parallel Evaluation").strong());
+                            ui.add_space(5.0);
+
+                            // Batch Size
+                            ui.horizontal(|ui| {
+                                ui.label("Batch Size:");
+                                ui.add(egui::Slider::new(&mut self.settings.batch_size, 1..=32)
+                                    .text("candidates")
+                                    .logarithmic(true));
+                            });
+                            ui.label("  Number of mutations to evaluate in parallel per generation");
+                            ui.label("  • 1 = sequential (original behavior)");
+                            ui.label("  • 8 = balanced (default, good parallelism)");
+                            ui.label("  • 16-32 = maximum exploration (more CPU usage)");
                         });
 
                     ui.add_space(10.0);
@@ -832,56 +1089,6 @@ impl MiraiApp {
                                     .text("alpha"));
                             });
                         });
-
-                    ui.add_space(15.0);
-                    ui.separator();
-
-                    // Informational note about when settings take effect
-                    ui.label(egui::RichText::new("ℹ Settings Update Behavior:")
-                        .color(egui::Color32::from_rgb(100, 150, 255)));
-                    ui.label("  • GUI Update Rate, Anti-aliasing & Autofocus: Apply immediately");
-                    ui.label("  • Optimization & Mutation settings: Take effect when loading new image");
-                    ui.add_space(10.0);
-
-                    // Apply and Save buttons
-                    ui.horizontal(|ui| {
-                        if ui.button("Apply Settings").on_hover_text("Apply changes to current session").clicked() {
-                            // Apply settings to global state immediately (GUI rate & AA only)
-                            crate::mutate::set_gui_update_rate(self.settings.gui_update_rate);
-                            crate::render::set_polygon_antialiasing(self.settings.polygon_antialiasing);
-
-                            // Apply autofocus settings to running engine immediately
-                            if let Some(tx) = &self.command_tx {
-                                let _ = tx.send(EngineCommand::UpdateAutofocusSettings(
-                                    self.settings.autofocus_enabled,
-                                    self.settings.autofocus_mode,
-                                    self.settings.autofocus_grid_size,
-                                    self.settings.autofocus_max_depth,
-                                    self.settings.autofocus_error_threshold,
-                                    self.settings.autofocus_interval,
-                                    self.settings.autofocus_multi_tile_count,
-                                    self.settings.autofocus_probabilistic,
-                                    self.settings.autofocus_progressive,
-                                    self.settings.gui_update_rate,
-                                ));
-                            }
-
-                            // Note: Other settings (mutation probabilities, triangle limits, alpha, steps)
-                            // are captured when creating the engine, so they only apply to new sessions
-                        }
-
-                        if ui.button("Save to Disk").on_hover_text("Save settings permanently (Ctrl+S)").clicked() {
-                            if let Err(e) = self.settings.save() {
-                                eprintln!("Failed to save settings: {}", e);
-                            }
-                        }
-
-                        if ui.button("Reset to Defaults").on_hover_text("Restore default settings").clicked() {
-                            self.settings = crate::settings::AppSettings::default();
-                            crate::mutate::set_gui_update_rate(self.settings.gui_update_rate);
-                            crate::render::set_polygon_antialiasing(self.settings.polygon_antialiasing);
-                        }
-                    });
 
                     // Keyboard shortcuts reference
                     ui.add_space(15.0);
@@ -1203,8 +1410,8 @@ impl eframe::App for MiraiApp {
                         let tile_width_norm = worst_region.right - worst_region.left;
                         let tile_height_norm = worst_region.bottom - worst_region.top;
                         let tile_pixels = (tile_width_norm * self.target_dims[0] as f32 * tile_height_norm * self.target_dims[1] as f32) as u32;
-                        // Max SAD for RGB (255 per channel × 3 channels) - matches fitness calculation
-                        let max_error = tile_pixels as f64 * 255.0 * 3.0;
+                        // Max SAD for RGBA (255 per channel × 4 channels) - matches sad_rgb_parallel computation
+                        let max_error = tile_pixels as f64 * 255.0 * 4.0;
                         let error_percent = (worst_sad / max_error) * 100.0;
 
                         // Display which tiles are actually active (based on mode)

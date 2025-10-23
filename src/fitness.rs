@@ -7,66 +7,96 @@ use crate::dna::Polygon;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
-/// SIMD-accelerated SAD computation using x86_64 PSADBW instruction (matches original Evolve's MMX version).
-/// Processes 8 bytes at a time using specialized Sum of Absolute Differences instruction.
+/// SIMD-accelerated SAD computation using x86_64 PSADBW instruction.
+/// Processes 16 bytes at a time using specialized Sum of Absolute Differences instruction.
+/// Upgraded from 8-byte to 16-byte loads for 2× throughput.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 unsafe fn sad_simd_chunk(target: &[u8], current: &[u8]) -> u64 {
     debug_assert!(target.len() == current.len());
-    debug_assert!(target.len() % 8 == 0);
+    debug_assert!(target.len() % 16 == 0);
 
     let mut sum = _mm_setzero_si128();
-    let chunks = target.len() / 8;
+    let chunks = target.len() / 16;
 
     for i in 0..chunks {
-        let offset = i * 8;
+        let offset = i * 16;
 
-        // Load 8 bytes from each buffer
-        let t_bytes = _mm_loadl_epi64(target.as_ptr().add(offset) as *const __m128i);
-        let c_bytes = _mm_loadl_epi64(current.as_ptr().add(offset) as *const __m128i);
+        // Load 16 bytes (full 128-bit register) from each buffer
+        let t_bytes = _mm_loadu_si128(target.as_ptr().add(offset) as *const __m128i);
+        let c_bytes = _mm_loadu_si128(current.as_ptr().add(offset) as *const __m128i);
 
-        // PSADBW: Sum of Absolute Differences (8 bytes → 1 u64 sum)
-        // This is the same instruction used by the original C++ Evolve (_m_psadbw)
+        // PSADBW: Sum of Absolute Differences (16 bytes → two u64 sums, one per 64-bit lane)
         let sad = _mm_sad_epu8(t_bytes, c_bytes);
         sum = _mm_add_epi64(sum, sad);
     }
 
-    // Extract the accumulated sum from the lower 64 bits
-    _mm_cvtsi128_si64(sum) as u64
+    // Extract and sum both 64-bit lanes (each contains sum of 8 bytes)
+    let low = _mm_cvtsi128_si64(sum) as u64;
+    let high = _mm_extract_epi64(sum, 1) as u64;
+    low + high
 }
 
 /// Parallel SIMD-accelerated SAD using Rayon + x86_64 intrinsics.
 /// Matches the original Evolve's multi-core SIMD implementation (widget.cpp:148-194).
+///
+/// Early-exit optimization: If best_so_far is provided and accumulated SAD exceeds it,
+/// returns u64::MAX immediately to signal "definitely worse than current best".
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-pub fn sad_rgb_parallel(target_rgba: &[u8], current_rgba: &[u8]) -> f64 {
+pub fn sad_rgb_parallel(target_rgba: &[u8], current_rgba: &[u8], best_so_far: Option<u64>) -> f64 {
     debug_assert_eq!(target_rgba.len(), current_rgba.len());
     debug_assert_eq!(target_rgba.len() % 4, 0);
 
     let len = target_rgba.len();
 
-    // Process in chunks aligned to 8-byte SIMD boundaries
-    // Round down to nearest multiple of 8
-    let simd_len = (len / 8) * 8;
+    // Process in chunks aligned to 16-byte SIMD boundaries
+    // Round down to nearest multiple of 16
+    let simd_len = (len / 16) * 16;
 
-    // Parallel SIMD processing (matching original Evolve's QtConcurrent approach)
+    // Parallel SIMD processing with minimum chunk size to reduce task overhead
+    // Minimum chunk: 256 KB = 262144 bytes (helps small/medium images)
+    const MIN_CHUNK_BYTES: usize = 256 * 1024;
     let num_cores = rayon::current_num_threads();
-    let chunk_size = ((simd_len / num_cores) / 8) * 8; // Align to 8-byte boundaries
-
-    let simd_sum: u64 = if chunk_size > 0 {
-        target_rgba[..simd_len]
-            .par_chunks(chunk_size)
-            .zip(current_rgba[..simd_len].par_chunks(chunk_size))
-            .map(|(t_chunk, c_chunk)| unsafe {
-                sad_simd_chunk(t_chunk, c_chunk)
-            })
-            .sum()
+    let chunk_size = if simd_len > 0 {
+        let ideal_chunk = (simd_len / num_cores / 16) * 16; // Align to 16-byte boundaries
+        ideal_chunk.max(MIN_CHUNK_BYTES)
     } else {
         0
     };
 
-    // Handle remainder bytes with scalar code (should be < 8 bytes = 0 or 1 pixel)
-    // Note: Include alpha to match SIMD behavior (PSADBW processes all 8 bytes including alpha)
+    let simd_sum: u64 = if chunk_size > 0 && chunk_size <= simd_len {
+        // Early-exit path: if we have a best_so_far, check periodically
+        if let Some(threshold) = best_so_far {
+            let mut acc = 0u64;
+            for (t_chunk, c_chunk) in target_rgba[..simd_len]
+                .chunks(chunk_size)
+                .zip(current_rgba[..simd_len].chunks(chunk_size))
+            {
+                let chunk_sad = unsafe { sad_simd_chunk(t_chunk, c_chunk) };
+                acc += chunk_sad;
+                // Check after each chunk (every 256KB typically)
+                if acc >= threshold {
+                    return u64::MAX as f64; // Early exit - definitely worse
+                }
+            }
+            acc
+        } else {
+            // No early-exit: parallel sum as before
+            target_rgba[..simd_len]
+                .par_chunks(chunk_size)
+                .zip(current_rgba[..simd_len].par_chunks(chunk_size))
+                .map(|(t_chunk, c_chunk)| unsafe {
+                    sad_simd_chunk(t_chunk, c_chunk)
+                })
+                .sum()
+        }
+    } else {
+        0
+    };
+
+    // Handle remainder bytes with scalar code (should be < 16 bytes = 0-3 pixels)
+    // Note: Include alpha to match SIMD behavior (PSADBW processes all 16 bytes including alpha)
     let remainder_pixels = (target_rgba.len() - simd_len) / 4;
     let scalar_sum: u64 = (0..remainder_pixels)
         .map(|i| {
@@ -79,20 +109,65 @@ pub fn sad_rgb_parallel(target_rgba: &[u8], current_rgba: &[u8]) -> f64 {
         })
         .sum();
 
-    (simd_sum + scalar_sum) as f64
+    let total = simd_sum + scalar_sum;
+
+    // Final check against threshold if provided
+    if let Some(threshold) = best_so_far {
+        if total >= threshold {
+            return u64::MAX as f64;
+        }
+    }
+
+    total as f64
 }
 
 /// Fallback non-SIMD version for non-x86_64 platforms
 /// Note: Includes alpha channel to match x86_64 SIMD behavior
+///
+/// Early-exit optimization: If best_so_far is provided and accumulated SAD exceeds it,
+/// returns u64::MAX immediately to signal "definitely worse than current best".
 #[cfg(not(target_arch = "x86_64"))]
 #[inline(always)]
-pub fn sad_rgb_parallel(target_rgba: &[u8], current_rgba: &[u8]) -> f64 {
+pub fn sad_rgb_parallel(target_rgba: &[u8], current_rgba: &[u8], best_so_far: Option<u64>) -> f64 {
     debug_assert_eq!(target_rgba.len(), current_rgba.len());
     debug_assert_eq!(target_rgba.len() % 4, 0);
 
     let pixels = target_rgba.len() / 4;
 
-    // Coarse-grain the parallelism to reduce per-task overhead:
+    // Early-exit path: sequential processing with periodic checks
+    if let Some(threshold) = best_so_far {
+        let mut acc = 0u64;
+        const CHECK_INTERVAL: usize = 1024; // Check every 1024 bytes = 256 pixels
+
+        for i in 0..pixels {
+            unsafe {
+                // SAFETY: we asserted 4-byte stride above
+                let t0 = *target_rgba.get_unchecked(i * 4);
+                let t1 = *target_rgba.get_unchecked(i * 4 + 1);
+                let t2 = *target_rgba.get_unchecked(i * 4 + 2);
+                let t3 = *target_rgba.get_unchecked(i * 4 + 3);
+
+                let s0 = *current_rgba.get_unchecked(i * 4);
+                let s1 = *current_rgba.get_unchecked(i * 4 + 1);
+                let s2 = *current_rgba.get_unchecked(i * 4 + 2);
+                let s3 = *current_rgba.get_unchecked(i * 4 + 3);
+
+                let d0 = (t0 as i32 - s0 as i32).abs() as u64;
+                let d1 = (t1 as i32 - s1 as i32).abs() as u64;
+                let d2 = (t2 as i32 - s2 as i32).abs() as u64;
+                let d3 = (t3 as i32 - s3 as i32).abs() as u64;
+                acc += d0 + d1 + d2 + d3;
+            }
+
+            // Check every CHECK_INTERVAL pixels (power of 2 for efficient masking)
+            if (i & (CHECK_INTERVAL - 1)) == 0 && acc >= threshold {
+                return u64::MAX as f64; // Early exit - definitely worse
+            }
+        }
+        return acc as f64;
+    }
+
+    // No early-exit: parallel processing as before
     let min_chunk = 64 * 1024; // pixels per Rayon "unit"
     let total: u64 = (0..pixels)
         .into_par_iter()
@@ -118,6 +193,196 @@ pub fn sad_rgb_parallel(target_rgba: &[u8], current_rgba: &[u8]) -> f64 {
         .sum();
 
     total as f64
+}
+
+/// ---- Gaussian pyramid (RGBA premul) for coarse-to-fine fitness evaluation ----
+
+/// Multi-resolution pyramid with 3 levels: 1/4x, 1/2x, 1x
+pub struct GaussianPyramid {
+    /// level 0 = 1/4x, level 1 = 1/2x, level 2 = 1x (full resolution)
+    pub levels: Vec<Vec<u8>>,
+    pub widths: Vec<u32>,
+    pub heights: Vec<u32>,
+}
+
+/// Box filter downsample by 2x (simple and fast, good enough for fitness approximation)
+#[inline]
+fn box_down_2x_rgba(src: &[u8], w: u32, h: u32) -> (Vec<u8>, u32, u32) {
+    let dst_w = (w + 1) / 2;
+    let dst_h = (h + 1) / 2;
+    let mut out = vec![0u8; (dst_w * dst_h * 4) as usize];
+
+    for y in 0..dst_h {
+        let sy0 = (y * 2).min(h - 1);
+        let sy1 = (sy0 + 1).min(h - 1);
+        for x in 0..dst_w {
+            let sx0 = (x * 2).min(w - 1);
+            let sx1 = (sx0 + 1).min(w - 1);
+
+            let idx = |xx: u32, yy: u32| ((yy * w + xx) * 4) as usize;
+            let i00 = idx(sx0, sy0);
+            let i10 = idx(sx1, sy0);
+            let i01 = idx(sx0, sy1);
+            let i11 = idx(sx1, sy1);
+            let o = ((y * dst_w + x) * 4) as usize;
+
+            // Simple box filter: average 4 samples
+            for c in 0..4 {
+                let s = src[i00 + c] as u32
+                    + src[i10 + c] as u32
+                    + src[i01 + c] as u32
+                    + src[i11 + c] as u32;
+                out[o + c] = (s >> 2) as u8;
+            }
+        }
+    }
+    (out, dst_w, dst_h)
+}
+
+/// Build 3-level Gaussian pyramid from premultiplied RGBA image
+/// Returns pyramid with levels: 0 = 1/4x, 1 = 1/2x, 2 = 1x (original)
+pub fn build_pyramid_rgba(premul_rgba: &[u8], w: u32, h: u32) -> GaussianPyramid {
+    profiling::scope!("build_pyramid_rgba");
+
+    // Level 2: full resolution (1x)
+    let l2 = premul_rgba.to_vec();
+
+    // Level 1: half resolution (1/2x)
+    let (l1, w1, h1) = box_down_2x_rgba(&l2, w, h);
+
+    // Level 0: quarter resolution (1/4x)
+    let (l0, w0, h0) = box_down_2x_rgba(&l1, w1, h1);
+
+    GaussianPyramid {
+        levels: vec![l0, l1, l2],
+        widths: vec![w0, w1, w],
+        heights: vec![h0, h1, h],
+    }
+}
+
+/// SAD over a rect at a specific pyramid level
+/// `rect` coords (x_min, y_min, x_max, y_max) are in FULL-RES coordinates
+/// `scale_div` is the downsampling factor (1, 2, or 4)
+#[inline]
+pub fn sad_rgb_rect_pyr_level(
+    target_lvl: &[u8],
+    lvl_w: u32,
+    lvl_h: u32,
+    scale_div: u32,
+    current_full: &[u8],
+    full_w: u32,
+    x_min: u32,
+    y_min: u32,
+    x_max: u32,
+    y_max: u32,
+    best_so_far: Option<u64>,
+) -> f64 {
+    // Map full-res coords to this pyramid level
+    let sx = |v: u32| (v / scale_div).min(lvl_w - 1);
+    let sy = |v: u32| (v / scale_div).min(lvl_h - 1);
+
+    let lx0 = sx(x_min);
+    let ly0 = sy(y_min);
+    let lx1 = sx(x_max);
+    let ly1 = sy(y_max);
+
+    let mut acc: u64 = 0;
+
+    // Sample current image at downsampled locations (nearest neighbor)
+    for ly in ly0..=ly1 {
+        let y = (ly * scale_div).min(y_max);
+        let tr = (ly * lvl_w * 4) as usize;
+
+        for lx in lx0..=lx1 {
+            let x = (lx * scale_div).min(x_max);
+            let ti = tr + (lx * 4) as usize;
+            let ci = ((y * full_w + x) * 4) as usize;
+
+            // SAD on all 4 channels (RGBA premul)
+            acc += (target_lvl[ti] as i32 - current_full[ci] as i32).abs() as u64;
+            acc += (target_lvl[ti + 1] as i32 - current_full[ci + 1] as i32).abs() as u64;
+            acc += (target_lvl[ti + 2] as i32 - current_full[ci + 2] as i32).abs() as u64;
+            acc += (target_lvl[ti + 3] as i32 - current_full[ci + 3] as i32).abs() as u64;
+        }
+
+        // Early abort if exceeding threshold
+        if let Some(t) = best_so_far {
+            if acc >= t {
+                return u64::MAX as f64;
+            }
+        }
+    }
+
+    acc as f64
+}
+
+/// Coarse-to-fine SAD for a rect: test 1/4x → 1/2x → 1x with early abort
+/// If any level exceeds threshold, immediately return u64::MAX
+/// This accelerates optimization by cheaply rejecting bad proposals
+pub fn sad_rgb_rect_pyramid(
+    pyr: &GaussianPyramid,
+    current_full: &[u8],
+    full_w: u32,
+    x_min: u32,
+    y_min: u32,
+    x_max: u32,
+    y_max: u32,
+    best_so_far: Option<u64>,
+) -> f64 {
+    profiling::scope!("sad_rgb_rect_pyramid");
+
+    // Level 0: 1/4x (coarsest, fastest)
+    let s = sad_rgb_rect_pyr_level(
+        &pyr.levels[0],
+        pyr.widths[0],
+        pyr.heights[0],
+        4,
+        current_full,
+        full_w,
+        x_min,
+        y_min,
+        x_max,
+        y_max,
+        best_so_far,
+    );
+    if let Some(t) = best_so_far {
+        if s >= t as f64 {
+            return u64::MAX as f64; // Early abort at 1/4x
+        }
+    }
+
+    // Level 1: 1/2x (medium detail)
+    let s = sad_rgb_rect_pyr_level(
+        &pyr.levels[1],
+        pyr.widths[1],
+        pyr.heights[1],
+        2,
+        current_full,
+        full_w,
+        x_min,
+        y_min,
+        x_max,
+        y_max,
+        best_so_far,
+    );
+    if let Some(t) = best_so_far {
+        if s >= t as f64 {
+            return u64::MAX as f64; // Early abort at 1/2x
+        }
+    }
+
+    // Level 2: 1x (full resolution, exact)
+    // Use existing optimized AVX2/scalar sad_rgb_rect for final measurement
+    sad_rgb_rect(
+        &pyr.levels[2],
+        current_full,
+        x_min,
+        y_min,
+        x_max,
+        y_max,
+        full_w,
+        best_so_far,
+    )
 }
 
 /// Compute axis-aligned bounding box of a polygon with anti-aliasing padding.
@@ -163,10 +428,12 @@ unsafe fn sad_rgb_rect_avx2(
     x_max: u32,
     y_max: u32,
     stride: u32,
+    best_so_far: Option<u64>,
 ) -> f64 {
     let mut sum: u64 = 0;
     let row_width = (x_max - x_min + 1) as usize;
     let row_bytes = row_width * 4; // 4 bytes per pixel (RGBA)
+    const CHECK_INTERVAL: u32 = 8; // Check every 8 rows
 
     // Process each row
     for y in y_min..=y_max {
@@ -178,15 +445,8 @@ unsafe fn sad_rgb_rect_avx2(
         let simd_bytes = simd_pixels * 4;
 
         let mut i = 0;
-        while i < simd_bytes {
+        while i + 32 <= simd_bytes {
             let idx = row_start + i;
-
-            // Bounds safety: ensure we don't read past buffer end
-            // AVX2 loads 32 bytes, so check idx + 32 <= buffer length
-            if idx + 32 > target.len() || idx + 32 > current.len() {
-                // Buffer overrun would occur - fall back to scalar processing for remaining bytes
-                break;
-            }
 
             // Load 32 bytes (8 pixels) from target and current
             let target_vec = _mm256_loadu_si256(target.as_ptr().add(idx) as *const __m256i);
@@ -208,8 +468,8 @@ unsafe fn sad_rgb_rect_avx2(
         sum += temp[0] + temp[1] + temp[2] + temp[3];
 
         // Handle remaining pixels in row with scalar code
-        // Start from where SIMD left off (either simd_bytes or where it was stopped by bounds check)
-        let mut j = i;  // Use 'i' instead of simd_bytes to handle early break
+        // Start from where SIMD left off (up to 31 bytes may remain)
+        let mut j = i;
         while j < row_bytes {
             let idx = row_start + j;
             // Bounds safety check for scalar path
@@ -219,6 +479,13 @@ unsafe fn sad_rgb_rect_avx2(
             let diff = (target[idx] as i32 - current[idx] as i32).abs() as u64;
             sum += diff;
             j += 1;
+        }
+
+        // Early-exit check every CHECK_INTERVAL rows
+        if let Some(threshold) = best_so_far {
+            if (y - y_min) % CHECK_INTERVAL == 0 && sum >= threshold {
+                return u64::MAX as f64;
+            }
         }
     }
 
@@ -235,8 +502,10 @@ fn sad_rgb_rect_scalar(
     x_max: u32,
     y_max: u32,
     stride: u32,
+    best_so_far: Option<u64>,
 ) -> f64 {
     let mut sum: u64 = 0;
+    const CHECK_INTERVAL: u32 = 8; // Check every 8 rows
 
     for y in y_min..=y_max {
         for x in x_min..=x_max {
@@ -249,6 +518,13 @@ fn sad_rgb_rect_scalar(
 
             sum += r_diff + g_diff + b_diff + a_diff;
         }
+
+        // Early-exit check every CHECK_INTERVAL rows
+        if let Some(threshold) = best_so_far {
+            if (y - y_min) % CHECK_INTERVAL == 0 && sum >= threshold {
+                return u64::MAX as f64;
+            }
+        }
     }
 
     sum as f64
@@ -257,6 +533,9 @@ fn sad_rgb_rect_scalar(
 /// Compute SAD over a rectangular region - dispatches to SIMD or scalar
 /// Rect is (x_min, y_min, x_max, y_max) in pixel coordinates (inclusive).
 /// Stride is the width of the full image in pixels.
+///
+/// Early-exit optimization: If best_so_far is provided and accumulated SAD exceeds it,
+/// returns u64::MAX immediately to signal "definitely worse than current best".
 #[inline]
 pub fn sad_rgb_rect(
     target: &[u8],
@@ -266,17 +545,18 @@ pub fn sad_rgb_rect(
     x_max: u32,
     y_max: u32,
     stride: u32,
+    best_so_far: Option<u64>,
 ) -> f64 {
     profiling::scope!("sad_rgb_rect");
 
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
-            return unsafe { sad_rgb_rect_avx2(target, current, x_min, y_min, x_max, y_max, stride) };
+            return unsafe { sad_rgb_rect_avx2(target, current, x_min, y_min, x_max, y_max, stride, best_so_far) };
         }
     }
 
-    sad_rgb_rect_scalar(target, current, x_min, y_min, x_max, y_max, stride)
+    sad_rgb_rect_scalar(target, current, x_min, y_min, x_max, y_max, stride, best_so_far)
 }
 
 /// Copy a rectangular region from src to dst.
@@ -293,9 +573,163 @@ pub fn blit_rect(
 ) {
     profiling::scope!("blit_rect");
 
+    // Safety invariants: catch bbox union bugs (zero cost in release builds)
+    debug_assert!(x_min <= x_max, "Invalid rect: x_min={} > x_max={}", x_min, x_max);
+    debug_assert!(y_min <= y_max, "Invalid rect: y_min={} > y_max={}", y_min, y_max);
+
     for y in y_min..=y_max {
         let row_start = ((y * stride + x_min) * 4) as usize;
         let row_end = ((y * stride + x_max + 1) * 4) as usize;
+
+        // Safety: ensure we don't read/write past buffer end
+        debug_assert!(row_end <= src.len(), "Buffer overrun: row_end={} > src.len()={}", row_end, src.len());
+        debug_assert!(row_end <= dst.len(), "Buffer overrun: row_end={} > dst.len()={}", row_end, dst.len());
+
         dst[row_start..row_end].copy_from_slice(&src[row_start..row_end]);
+    }
+}
+
+/// ---- Tiled fitness ---------------------------------------------------------
+
+/// Tiled error cache for fast incremental fitness evaluation.
+/// Divides the image into NxN tiles and caches per-tile error sums.
+/// When evaluating a mutation, only re-computes tiles overlapped by the bbox,
+/// enabling early-exit as soon as accumulated error exceeds best_so_far.
+#[derive(Clone)]
+pub struct TileGrid {
+    pub tile: u32,        // Tile size in pixels (e.g., 32, 64, 128)
+    pub tiles_x: u32,     // Number of tiles horizontally
+    pub tiles_y: u32,     // Number of tiles vertically
+    /// Sum of abs diffs per tile at 1× (u64 to avoid overflow)
+    pub errs: Vec<u64>,   // Length = tiles_x * tiles_y
+    /// Cached total error (sum of all tiles) for O(1) full-image fitness queries
+    pub total_err: u64,
+}
+
+impl TileGrid {
+    /// Create a new tile grid and compute initial per-tile errors.
+    /// tile: tile size in pixels (recommend 32-128 depending on image size)
+    /// w, h: image dimensions
+    /// target, current: premultiplied RGBA buffers
+    pub fn new(tile: u32, w: u32, h: u32, target: &[u8], current: &[u8]) -> Self {
+        profiling::scope!("TileGrid::new");
+        let tiles_x = (w + tile - 1) / tile;
+        let tiles_y = (h + tile - 1) / tile;
+        let errs = vec![0u64; (tiles_x * tiles_y) as usize];
+        let mut tg = TileGrid { tile, tiles_x, tiles_y, errs, total_err: 0 };
+        tg.recompute_all(w, h, target, current);
+        tg
+    }
+
+    /// Map pixel rect to tile indices (inclusive)
+    #[inline]
+    fn tile_rect(&self, _w: u32, _h: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> (u32, u32, u32, u32) {
+        let tx0 = (x0 / self.tile).min(self.tiles_x.saturating_sub(1));
+        let ty0 = (y0 / self.tile).min(self.tiles_y.saturating_sub(1));
+        let tx1 = (x1 / self.tile).min(self.tiles_x.saturating_sub(1));
+        let ty1 = (y1 / self.tile).min(self.tiles_y.saturating_sub(1));
+        (tx0, ty0, tx1, ty1)
+    }
+
+    /// Recompute all tile errors from scratch (rare - only at init or full buffer changes)
+    pub fn recompute_all(&mut self, w: u32, h: u32, target: &[u8], current: &[u8]) {
+        profiling::scope!("TileGrid::recompute_all");
+        let mut total = 0u64;
+        for ty in 0..self.tiles_y {
+            for tx in 0..self.tiles_x {
+                let x0 = tx * self.tile;
+                let y0 = ty * self.tile;
+                let x1 = (x0 + self.tile - 1).min(w - 1);
+                let y1 = (y0 + self.tile - 1).min(h - 1);
+                let e = sad_rgb_rect(target, current, x0, y0, x1, y1, w, None) as u64;
+                self.errs[(ty * self.tiles_x + tx) as usize] = e;
+                total += e;
+            }
+        }
+        self.total_err = total;
+    }
+
+    /// Compute fitness delta by ONLY re-summing the tiles overlapped by [x0..x1, y0..y1].
+    /// Returns (new_fitness, early_aborted).
+    /// If early_aborted = true, new_fitness = u64::MAX (definitely worse).
+    ///
+    /// This is the core optimization: instead of recomputing full-image fitness,
+    /// we splice in updated tiles and early-exit per-tile if exceeding threshold.
+    pub fn delta_for_rect(
+        &self,
+        w: u32,
+        h: u32,
+        target: &[u8],
+        _current_old: &[u8],
+        current_new: &[u8],
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+        best_so_far: Option<u64>,
+    ) -> (u64, bool) {
+        profiling::scope!("TileGrid::delta_for_rect");
+
+        // Start with current total error
+        let mut total = self.errs.iter().copied().sum::<u64>();
+
+        // Find tiles overlapped by the rect
+        let (tx0, ty0, tx1, ty1) = self.tile_rect(w, h, x0, y0, x1, y1);
+
+        // Re-compute only overlapped tiles
+        for ty in ty0..=ty1 {
+            for tx in tx0..=tx1 {
+                let idx = (ty * self.tiles_x + tx) as usize;
+                let x_tile = tx * self.tile;
+                let y_tile = ty * self.tile;
+                let x_max = (x_tile + self.tile - 1).min(w - 1);
+                let y_max = (y_tile + self.tile - 1).min(h - 1);
+
+                // Subtract old tile contribution
+                let old_e = self.errs[idx];
+                total -= old_e;
+
+                // Add new tile contribution (recomputed against new buffer)
+                let new_e = sad_rgb_rect(target, current_new, x_tile, y_tile, x_max, y_max, w, None) as u64;
+                total += new_e;
+
+                // Early exit if we already exceed best_so_far
+                if let Some(threshold) = best_so_far {
+                    if total >= threshold {
+                        return (u64::MAX, true);
+                    }
+                }
+            }
+        }
+
+        (total, false)
+    }
+
+    /// After accepting a mutation, update the cached tiles it touched.
+    /// This keeps the cache in sync with the current buffer.
+    /// Maintains total_err incrementally for O(k) updates where k = affected tiles.
+    pub fn accept_rect_update(&mut self, w: u32, h: u32, target: &[u8], current: &[u8], x0: u32, y0: u32, x1: u32, y1: u32) {
+        profiling::scope!("TileGrid::accept_rect_update");
+        let (tx0, ty0, tx1, ty1) = self.tile_rect(w, h, x0, y0, x1, y1);
+        for ty in ty0..=ty1 {
+            for tx in tx0..=tx1 {
+                let idx = (ty * self.tiles_x + tx) as usize;
+                let x_tile = tx * self.tile;
+                let y_tile = ty * self.tile;
+                let x_max = (x_tile + self.tile - 1).min(w - 1);
+                let y_max = (y_tile + self.tile - 1).min(h - 1);
+
+                // Subtract old tile error from total
+                let old_e = self.errs[idx];
+                self.total_err -= old_e;
+
+                // Compute and cache new tile error
+                let new_e = sad_rgb_rect(target, current, x_tile, y_tile, x_max, y_max, w, None) as u64;
+                self.errs[idx] = new_e;
+
+                // Add new tile error to total
+                self.total_err += new_e;
+            }
+        }
     }
 }

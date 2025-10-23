@@ -70,6 +70,7 @@ impl Genome {
         alpha_max: f32,
         num_points: usize,
         region: Option<&FocusRegion>,
+        enforce_simple_convex: bool,
     ) -> Polygon {
         profiling::scope!("smart_polygon_in_region");
         let w = self.width as f32;
@@ -91,6 +92,24 @@ impl Genome {
             let x = x_min + rng.random::<f32>() * width_range;
             let y = y_min + rng.random::<f32>() * height_range;
             points.push((x, y));
+        }
+
+        // Validate geometry if enforcement is enabled
+        if enforce_simple_convex {
+            // Try to sanitize (ensures CCW + validates simple + convex)
+            if !crate::geom::sanitize_ccw_simple_convex(&mut points) {
+                // Fallback: sort by angle around centroid to create a proper convex polygon
+                let cx = points.iter().map(|p| p.0).sum::<f32>() / points.len() as f32;
+                let cy = points.iter().map(|p| p.1).sum::<f32>() / points.len() as f32;
+                points.sort_by(|a, b| {
+                    let angle_a = (a.1 - cy).atan2(a.0 - cx);
+                    let angle_b = (b.1 - cy).atan2(b.0 - cx);
+                    angle_a.partial_cmp(&angle_b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                // Retry sanitization after angle-sort (should now be valid)
+                crate::geom::sanitize_ccw_simple_convex(&mut points);
+            }
         }
 
         // Compute center of polygon

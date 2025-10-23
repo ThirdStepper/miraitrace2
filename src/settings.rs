@@ -13,6 +13,34 @@ pub enum AutofocusMode {
     BSPTree,
 }
 
+/// Polygon vertex count control (arity mode)
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PolygonArityMode {
+    /// Dynamic arity: starts at 6, reduces to 3 as polygon count grows (original behavior)
+    Dynamic,
+    /// Fixed arity: triangles only (3 vertices)
+    TriOnly,
+    /// Fixed arity: quads only (4 vertices)
+    QuadOnly,
+    /// Fixed arity: pentagons only (5 vertices)
+    PentaOnly,
+    /// Fixed arity: hexagons only (6 vertices)
+    HexaOnly,
+}
+
+impl PolygonArityMode {
+    /// Returns (min_vertices, max_vertices) for this arity mode
+    pub fn limits(self) -> (usize, usize) {
+        match self {
+            PolygonArityMode::Dynamic => (3, 6),
+            PolygonArityMode::TriOnly => (3, 3),
+            PolygonArityMode::QuadOnly => (4, 4),
+            PolygonArityMode::PentaOnly => (5, 5),
+            PolygonArityMode::HexaOnly => (6, 6),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {
     // UI/Rendering Settings
@@ -80,6 +108,24 @@ pub struct AppSettings {
     /// Number of candidate mutations to evaluate in parallel per generation (1 = no batching)
     /// Higher values = more exploration, better parallelism, but slower convergence
     pub batch_size: usize,
+
+    // Polygon Shape
+    /// Polygon vertex count control (3-6 vertices, dynamic or fixed)
+    pub polygon_arity_mode: PolygonArityMode,
+
+    // Geometry Constraints
+    /// Enforce simple, convex, CCW polygons (prevents self-intersections/bow-ties)
+    pub enforce_simple_convex: bool,
+
+    // Fast Fitness Evaluation
+    /// Use coarse-to-fine pyramid fitness for faster optimization (experimental, may reduce quality)
+    pub use_pyramid_fitness: bool,
+    /// Use tiled fitness cache for incremental evaluation (recommended, minimal quality impact)
+    pub use_tiled_fitness: bool,
+    /// Auto-compute tile size based on image dimensions (recommended)
+    pub tile_auto: bool,
+    /// Manual tile size override (only used when tile_auto = false, range 16-128)
+    pub tile_size: u32,
 }
 
 impl Default for AppSettings {
@@ -125,7 +171,26 @@ impl Default for AppSettings {
 
             // Batch evaluation (8 candidates per generation = good balance)
             batch_size: 8,
+
+            // Polygon shape (dynamic arity = original behavior)
+            polygon_arity_mode: PolygonArityMode::Dynamic,
+
+            // Geometry constraints (enabled by default for better stability)
+            enforce_simple_convex: true,
+
+            // Fast fitness evaluation
+            use_pyramid_fitness: true,  // Enabled by default (proven safe)
+            use_tiled_fitness: true,    // Enabled by default (minimal overhead, significant speedup)
+            tile_auto: true,            // Auto tile size (recommended)
+            tile_size: 64,              // Fallback when manual (typical default)
         }
+    }
+}
+
+impl AppSettings {
+    /// Get vertex limits from the polygon arity mode (convenience helper)
+    pub fn vertex_limits(&self) -> (usize, usize) {
+        self.polygon_arity_mode.limits()
     }
 }
 
@@ -158,6 +223,7 @@ impl AppSettings {
 
     /// Convert to MutateConfig for the evolution engine
     pub fn to_mutate_config(&self) -> crate::mutate::MutateConfig {
+        let (min_vertices, max_vertices) = self.vertex_limits();
         crate::mutate::MutateConfig {
             p_add: self.p_add,
             p_remove: self.p_remove,
@@ -172,6 +238,11 @@ impl AppSettings {
             alpha_min: self.alpha_min,
             alpha_max: self.alpha_max,
             batch_size: self.batch_size,
+            min_vertices,
+            max_vertices,
+            enforce_simple_convex: self.enforce_simple_convex,
+            use_pyramid_fitness: self.use_pyramid_fitness,
+            use_tiled_fitness: self.use_tiled_fitness,
         }
     }
 }

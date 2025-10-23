@@ -1,6 +1,6 @@
 use crate::dna::Genome;
 use crate::render::CpuRenderer;
-use crate::fitness::{sad_rgb_parallel, poly_bounds_aa, sad_rgb_rect, blit_rect};
+use crate::fitness::{sad_rgb_parallel, poly_bounds_aa, sad_rgb_rect, sad_rgb_rect_pyramid, blit_rect, GaussianPyramid};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use rayon::prelude::*;
@@ -12,7 +12,7 @@ static GUI_UPDATE_RATE: AtomicU32 = AtomicU32::new(4);  // Dynamic: can be chang
 
 /// Update the GUI update rate (called from settings UI)
 pub fn set_gui_update_rate(rate: u32) {
-    GUI_UPDATE_RATE.store(rate.max(1), Ordering::Relaxed); // Minimum 1
+    GUI_UPDATE_RATE.store(rate.max(1), Ordering::Release); // Minimum 1
 }
 
 #[derive(Clone)]
@@ -44,6 +44,17 @@ pub struct MutateConfig {
 
     // Batch evaluation
     pub batch_size: usize,  // Number of candidates to evaluate in parallel per generation
+
+    // Polygon vertex count limits (arity control)
+    pub min_vertices: usize,  // Minimum vertices per polygon (3-6)
+    pub max_vertices: usize,  // Maximum vertices per polygon (3-6)
+
+    // Geometry constraints
+    pub enforce_simple_convex: bool,  // Enforce simple, convex, CCW polygons (no bow-ties)
+
+    // Fast fitness evaluation
+    pub use_pyramid_fitness: bool,  // Use coarse-to-fine pyramid for faster fitness (experimental)
+    pub use_tiled_fitness: bool,    // Use tiled error cache for incremental fitness (recommended)
 }
 
 impl Default for MutateConfig {
@@ -74,17 +85,24 @@ impl Default for MutateConfig {
 
             // Batch evaluation (8 candidates per generation)
             batch_size: 8,
+
+            // Polygon vertex count limits (dynamic 3-6 = original behavior)
+            min_vertices: 3,
+            max_vertices: 6,
+
+            // Geometry constraints (enabled by default)
+            enforce_simple_convex: true,
+
+            // Fast fitness (enabled by default - both are proven safe)
+            use_pyramid_fitness: true,
+            use_tiled_fitness: true,
         }
     }
 }
 
-#[allow(dead_code)]
-#[inline]
-fn clamp01(x: f32) -> f32 { x.max(0.0).min(1.0) }
-
 /// Color mutation directions for hill-climbing optimization
 #[derive(Debug, Clone, Copy)]
-enum ColorDirection {
+pub enum ColorDirection {
     Lighter,     // Multiply RGB by 1.1
     Darker,      // Multiply RGB by 0.9
     RedUp,       // Increase R
@@ -99,7 +117,7 @@ enum ColorDirection {
 
 /// Apply a color direction mutation to RGBA values
 #[inline]
-fn apply_color_direction(rgba: &mut [f32; 4], dir: ColorDirection, step: f32, cfg: &MutateConfig) {
+pub fn apply_color_direction(rgba: &mut [f32; 4], dir: ColorDirection, step: f32, cfg: &MutateConfig) {
     match dir {
         ColorDirection::Lighter => {
             rgba[0] = (rgba[0] * 1.1).clamp(0.0, 1.0);
@@ -117,8 +135,8 @@ fn apply_color_direction(rgba: &mut [f32; 4], dir: ColorDirection, step: f32, cf
         ColorDirection::RedDown => rgba[0] = (rgba[0] - step).clamp(0.0, 1.0),
         ColorDirection::BlueUp => rgba[2] = (rgba[2] + step).clamp(0.0, 1.0),
         ColorDirection::GreenDown => rgba[1] = (rgba[1] - step).clamp(0.0, 1.0),
-        ColorDirection::AlphaDown => rgba[3] = (rgba[3] - step).clamp(cfg.alpha_min, 1.0),
-        ColorDirection::AlphaUp => rgba[3] = (rgba[3] + step).clamp(cfg.alpha_min, 1.0),
+        ColorDirection::AlphaDown => rgba[3] = (rgba[3] - step).clamp(cfg.alpha_min, cfg.alpha_max),
+        ColorDirection::AlphaUp => rgba[3] = (rgba[3] + step).clamp(cfg.alpha_min, cfg.alpha_max),
     }
 }
 
@@ -139,6 +157,7 @@ pub fn optimize_colors<F>(
     tri_idx: usize,
     target_premul: &[u8],          // PREMULTIPLIED RGBA (cached in Engine)
     _current_rgba: &[u8],
+    pyramid: Option<&GaussianPyramid>, // Optional pyramid for coarse-to-fine fitness
     cfg: &MutateConfig,
     update_callback: &mut F,
 ) -> (Genome, Vec<u8>, f64)
@@ -148,7 +167,7 @@ where
     profiling::scope!("optimize_colors");
     if tri_idx >= genome.polys.len() {
         let rgba = CpuRenderer::render_rgba_premul(genome);
-        let fitness = sad_rgb_parallel(target_premul, &rgba);
+        let fitness = sad_rgb_parallel(target_premul, &rgba, None);
         return (genome.clone(), rgba, fitness);
     }
 
@@ -160,7 +179,7 @@ where
 
     // Render current state PREMULT (no expensive unpremultiply!)
     let mut current_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&best, tri_idx, &base_premul);
-    let mut current_fitness = sad_rgb_parallel(target_premul, &current_render_premul);
+    let mut current_fitness = sad_rgb_parallel(target_premul, &current_render_premul, None);
 
     // Directions exactly like Evolve (now using enum instead of boxed closures)
     let step = cfg.color_step;
@@ -190,10 +209,6 @@ where
         let (x_min_old, y_min_old, x_max_old, y_max_old) =
             poly_bounds_aa(&best.polys[tri_idx], width, height);
 
-        // Compute SAD over current rect (baseline for delta computation)
-        let sad_old_rect = sad_rgb_rect(target_premul, &current_render_premul,
-            x_min_old, y_min_old, x_max_old, y_max_old, width);
-
         // Test ALL directions in parallel (each thread has its own rendering state via thread_local!)
         let results: Vec<_> = DIRECTIONS.par_iter().map(|&direction| {
             profiling::scope!("test_direction");
@@ -205,7 +220,7 @@ where
             // Apply mutation
             let poly = Arc::make_mut(&mut candidate.polys[tri_idx]);
             apply_color_direction(&mut poly.rgba, direction, step, cfg);
-            poly.rgba[3] = poly.rgba[3].clamp(cfg.alpha_min, 1.0);
+            poly.rgba[3] = poly.rgba[3].clamp(cfg.alpha_min, cfg.alpha_max);
 
             // Compute bbox of mutated polygon
             let (x_min_new, y_min_new, x_max_new, y_max_new) =
@@ -220,12 +235,24 @@ where
             // Render candidate (thread-local SCRATCH_PIX means no contention!)
             let cand_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&candidate, tri_idx, &base_premul);
 
-            // Compute SAD over rect in candidate state
-            let sad_new_rect = sad_rgb_rect(target_premul, &cand_render_premul,
-                x_min, y_min, x_max, y_max, width);
+            // Compute SAD over union in candidate state (use pyramid if enabled)
+            let sad_new_union = if cfg.use_pyramid_fitness && pyramid.is_some() {
+                sad_rgb_rect_pyramid(pyramid.unwrap(), &cand_render_premul,
+                    width, x_min, y_min, x_max, y_max, None)
+            } else {
+                sad_rgb_rect(target_premul, &cand_render_premul,
+                    x_min, y_min, x_max, y_max, width, None)
+            };
 
-            // Update global fitness: fitness_new = fitness_old - SAD(old_rect) + SAD(new_rect)
-            let cand_fitness = current_fitness - sad_old_rect + sad_new_rect;
+            // Correct delta: subtract current SAD over union, add candidate SAD over union
+            let sad_old_union = if cfg.use_pyramid_fitness && pyramid.is_some() {
+                sad_rgb_rect_pyramid(pyramid.unwrap(), &current_render_premul,
+                    width, x_min, y_min, x_max, y_max, None)
+            } else {
+                sad_rgb_rect(target_premul, &current_render_premul,
+                    x_min, y_min, x_max, y_max, width, None)
+            };
+            let cand_fitness = current_fitness - sad_old_union + sad_new_union;
 
             // Return all info needed to accept this direction
             (direction, candidate, cand_render_premul, cand_fitness, orig_rgba, x_min, y_min, x_max, y_max)
@@ -246,10 +273,10 @@ where
 
                 current_fitness = *cand_fitness;
 
-                // Counter-based GUI throttling (cheap atomic increment + modulo)
+                // Counter-based GUI throttling (atomic increment + modulo with AcqRel semantics)
                 // Callback every Nth improvement for visual feedback
-                let count = IMPROVEMENT_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let update_rate = GUI_UPDATE_RATE.load(Ordering::Relaxed);
+                let count = IMPROVEMENT_COUNTER.fetch_add(1, Ordering::AcqRel);
+                let update_rate = GUI_UPDATE_RATE.load(Ordering::Acquire);
                 if count % update_rate == 0 {
                     // Pass premultiplied directly (egui supports it natively)
                     update_callback(&best, &current_render_premul, current_fitness, true);
@@ -283,6 +310,7 @@ pub fn optimize_shape<F>(
     tri_idx: usize,
     target_premul: &[u8],          // PREMULTIPLIED RGBA (cached in Engine)
     _current_rgba: &[u8],
+    pyramid: Option<&GaussianPyramid>, // Optional pyramid for coarse-to-fine fitness
     cfg: &MutateConfig,
     update_callback: &mut F,
 ) -> (Genome, Vec<u8>, f64)
@@ -292,7 +320,7 @@ where
     profiling::scope!("optimize_shape");
     if tri_idx >= genome.polys.len() {
         let rgba = CpuRenderer::render_rgba_premul(genome);
-        let fitness = sad_rgb_parallel(target_premul, &rgba);
+        let fitness = sad_rgb_parallel(target_premul, &rgba, None);
         return (genome.clone(), rgba, fitness);
     }
 
@@ -303,7 +331,7 @@ where
 
     // Render current state PREMULT (no expensive unpremultiply!)
     let mut current_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&best, tri_idx, &base_premul);
-    let mut current_fitness = sad_rgb_parallel(target_premul, &current_render_premul);
+    let mut current_fitness = sad_rgb_parallel(target_premul, &current_render_premul, None);
 
     let step = cfg.pos_step;
     let dirs: &[(f32, f32)] = &[( step, 0.0), (-step, 0.0), (0.0,  step), (0.0, -step)];
@@ -315,6 +343,9 @@ where
 
     let num_points = best.polys[tri_idx].points.len();
 
+    // Reuse tests Vec across iterations to avoid micro-allocations
+    let mut tests = Vec::with_capacity(num_points * dirs.len());
+
     // Steepest descent: loop until testing all vertex-direction combinations finds no improvement
     'outer: loop {
         profiling::scope!("optimize_shape_iteration");
@@ -323,12 +354,8 @@ where
         let (x_min_old, y_min_old, x_max_old, y_max_old) =
             poly_bounds_aa(&best.polys[tri_idx], width, height);
 
-        // Compute SAD over current rect (baseline for delta computation)
-        let sad_old_rect = sad_rgb_rect(target_premul, &current_render_premul,
-            x_min_old, y_min_old, x_max_old, y_max_old, width);
-
         // Build list of all (vertex_index, direction) pairs to test in parallel
-        let mut tests = Vec::with_capacity(num_points * dirs.len());
+        tests.clear(); // Reuse capacity, avoid reallocation
         for vi in 0..num_points {
             for &dir in dirs {
                 tests.push((vi, dir));
@@ -336,7 +363,7 @@ where
         }
 
         // Test ALL vertex-direction combinations in parallel
-        let results: Vec<_> = tests.par_iter().map(|&(vi, (dx, dy))| {
+        let results: Vec<_> = tests.par_iter().filter_map(|&(vi, (dx, dy))| {
             profiling::scope!("test_vertex_direction");
 
             // Clone genome for this thread
@@ -349,6 +376,16 @@ where
             y = (y + dy).clamp(0.0, (height as f32) - 1.0);
             let mut new_poly = (*candidate.polys[tri_idx]).clone();
             new_poly.points[vi] = (x, y);
+
+            // Validate geometry if enforcement enabled
+            if cfg.enforce_simple_convex {
+                let mut temp_points = new_poly.points.clone();
+                if !crate::geom::sanitize_ccw_simple_convex(&mut temp_points) {
+                    return None; // Invalid - filter out this candidate
+                }
+                new_poly.points = temp_points; // Accept any CCW fix from sanitize
+            }
+
             candidate.polys[tri_idx] = Arc::new(new_poly);
 
             // Compute bbox of mutated polygon
@@ -364,15 +401,27 @@ where
             // Render candidate (thread-local SCRATCH_PIX means no contention!)
             let cand_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&candidate, tri_idx, &base_premul);
 
-            // Compute SAD over rect in candidate state
-            let sad_new_rect = sad_rgb_rect(target_premul, &cand_render_premul,
-                x_min, y_min, x_max, y_max, width);
+            // Compute SAD over union in candidate state (use pyramid if enabled)
+            let sad_new_union = if cfg.use_pyramid_fitness && pyramid.is_some() {
+                sad_rgb_rect_pyramid(pyramid.unwrap(), &cand_render_premul,
+                    width, x_min, y_min, x_max, y_max, None)
+            } else {
+                sad_rgb_rect(target_premul, &cand_render_premul,
+                    x_min, y_min, x_max, y_max, width, None)
+            };
 
-            // Update global fitness: fitness_new = fitness_old - SAD(old_rect) + SAD(new_rect)
-            let cand_fitness = current_fitness - sad_old_rect + sad_new_rect;
+            // Correct delta: subtract current SAD over union, add candidate SAD over union
+            let sad_old_union = if cfg.use_pyramid_fitness && pyramid.is_some() {
+                sad_rgb_rect_pyramid(pyramid.unwrap(), &current_render_premul,
+                    width, x_min, y_min, x_max, y_max, None)
+            } else {
+                sad_rgb_rect(target_premul, &current_render_premul,
+                    x_min, y_min, x_max, y_max, width, None)
+            };
+            let cand_fitness = current_fitness - sad_old_union + sad_new_union;
 
             // Return all info needed to accept this mutation
-            (vi, (dx, dy), candidate, cand_render_premul, cand_fitness, orig_point, x_min, y_min, x_max, y_max)
+            Some((vi, (dx, dy), candidate, cand_render_premul, cand_fitness, orig_point, x_min, y_min, x_max, y_max))
         }).collect();
 
         // Find best improvement from parallel results
@@ -390,9 +439,9 @@ where
 
                 current_fitness = *cand_fitness;
 
-                // Counter-based GUI throttling
-                let count = IMPROVEMENT_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let update_rate = GUI_UPDATE_RATE.load(Ordering::Relaxed);
+                // Counter-based GUI throttling (atomic increment + modulo with AcqRel semantics)
+                let count = IMPROVEMENT_COUNTER.fetch_add(1, Ordering::AcqRel);
+                let update_rate = GUI_UPDATE_RATE.load(Ordering::Acquire);
                 if count % update_rate == 0 {
                     // Pass premultiplied directly (egui supports it natively)
                     update_callback(&best, &current_render_premul, current_fitness, true);

@@ -117,6 +117,7 @@ pub fn compute_tile_errors(
                 x_max,
                 y_max,
                 width,
+                None, // No early-exit: need accurate tile errors for autofocus
             );
 
             // Create FocusRegion for this tile (normalized coordinates 0.0-1.0)

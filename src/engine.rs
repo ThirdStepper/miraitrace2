@@ -4,11 +4,12 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use crate::dna::{Genome, Polygon};
-use crate::fitness::sad_rgb_parallel;
-use crate::mutate::{optimize_colors, optimize_shape, MutateConfig};
+use crate::fitness::{sad_rgb_parallel, sad_rgb_rect, poly_bounds_aa, build_pyramid_rgba, GaussianPyramid, TileGrid};
+use crate::mutate::MutateConfig;
 use crate::render::CpuRenderer;
 use crate::analysis::find_dominant_color;
 use crate::app::FocusRegion;
+use crate::geom::DirtyRect;
 
 pub struct Engine {
     rng: Pcg32,
@@ -18,6 +19,10 @@ pub struct Engine {
     pub current_fitness: f64,  // SAD fitness (lower is better)
     target_rgba: Vec<u8>,      // premultiplied RGBA (for fitness)
     target_unpremul: Vec<u8>,  // unpremultiplied RGBA (for color sampling / analysis)
+    target_pyr: GaussianPyramid, // Multi-resolution pyramid (1/4x, 1/2x, 1x) for coarse-to-fine fitness
+    tile_grid: Option<TileGrid>,  // Tiled error cache for fast incremental fitness
+    pub width: u32,            // Cached image width
+    pub height: u32,           // Cached image height
     pub generation: u64,       // Generation counter (incremented during optimization)
     pub num_poly_points: usize, // Progressive detail: starts at 6, reduces to 3 (matching Evolve)
     pub focus_region: Option<FocusRegion>, // Optional region for targeted evolution
@@ -50,7 +55,30 @@ impl Engine {
         // Store both premultiplied (for fitness) and unpremultiplied (for color sampling)
         let target_unpremul = target_rgba;
         let target_rgba = crate::render::premultiply(&target_unpremul);
-        let current_fitness = sad_rgb_parallel(&target_rgba, &current_rgba);
+
+        // Build multi-resolution pyramid once for coarse-to-fine fitness evaluation
+        let target_pyr = build_pyramid_rgba(&target_rgba, width, height);
+
+        // Initialize tiled fitness cache if enabled
+        let tile_grid = if cfg.use_tiled_fitness {
+            // Auto tile size heuristic based on image area
+            let area = (width as u64) * (height as u64);
+            let tile_size = if area <= 500_000 {
+                32  // ≤0.5MP: small tiles for fine granularity
+            } else if area <= 8_000_000 {
+                64  // ≤8MP (typical 1080p-4K): balanced
+            } else {
+                128 // >8MP: large tiles to reduce overhead
+            };
+            Some(TileGrid::new(tile_size, width, height, &target_rgba, &current_rgba))
+        } else {
+            None
+        };
+
+        let current_fitness = sad_rgb_parallel(&target_rgba, &current_rgba, None);
+
+        // Save max_vertices before cfg is moved
+        let initial_poly_points = cfg.max_vertices;
 
         Self {
             rng,
@@ -60,8 +88,12 @@ impl Engine {
             current_fitness,
             target_rgba,
             target_unpremul,
+            target_pyr,
+            tile_grid,
+            width,
+            height,
             generation: 0,
-            num_poly_points: 6, // Start with 6-point polygons (matching Evolve)
+            num_poly_points: initial_poly_points, // Start with max vertices from arity mode
             focus_region: None, // Start with full image focus
             // Autofocus defaults (matching Evolve's proven settings)
             autofocus_enabled: true,        // Enabled by default for automatic performance boost
@@ -81,15 +113,23 @@ impl Engine {
     }
 
     /// Update the number of polygon points based on current polygon count (matches Evolve's progressive detail).
-    /// Starts at 6, reduces to 5 at 10 polys, 4 at 25 polys, 3 (triangles) at 50 polys.
+    /// For dynamic mode: starts at max_vertices, reduces progressively to min_vertices.
+    /// For fixed arity modes (min == max): skips entirely (no progressive reduction).
     fn update_poly_points(&mut self) {
         profiling::scope!("update_poly_points");
+
+        // Fixed arity mode: no progressive reduction
+        if self.cfg.min_vertices == self.cfg.max_vertices {
+            return;
+        }
+
+        // Dynamic mode: progressive reduction (6→5→4→3 by default)
         let poly_count = self.genome.polys.len();
-        if poly_count == 10 && self.num_poly_points == 6 {
+        if poly_count == 10 && self.num_poly_points == 6 && self.cfg.min_vertices <= 5 {
             self.num_poly_points = 5;
-        } else if poly_count == 25 && self.num_poly_points == 5 {
+        } else if poly_count == 25 && self.num_poly_points == 5 && self.cfg.min_vertices <= 4 {
             self.num_poly_points = 4;
-        } else if poly_count == 50 && self.num_poly_points == 4 {
+        } else if poly_count == 50 && self.num_poly_points == 4 && self.cfg.min_vertices <= 3 {
             self.num_poly_points = 3;
         }
     }
@@ -100,6 +140,27 @@ impl Engine {
     fn update_current(&mut self, rgba: Vec<u8>, fitness: f64) {
         self.current_rgba = rgba;  // Already premul, just store it
         self.current_fitness = fitness;
+        // Full buffer change - recompute all tile errors
+        if let Some(ref mut tg) = self.tile_grid {
+            tg.recompute_all(self.width, self.height, &self.target_rgba, &self.current_rgba);
+        }
+    }
+
+    /// Helper to update current_rgba and fitness with incremental tile update.
+    /// Only recomputes tiles overlapped by the given rect (much faster than full recompute).
+    /// rgba parameter must be premultiplied (from render_rgba_premul()).
+    #[inline]
+    fn update_current_in_rect(&mut self, rgba: Vec<u8>, fitness: f64, rect: DirtyRect) {
+        self.current_rgba = rgba;
+        self.current_fitness = fitness;
+        // Incremental update - only recompute affected tiles (O(k) where k = tiles in rect)
+        if let Some(ref mut tg) = self.tile_grid {
+            tg.accept_rect_update(
+                self.width, self.height,
+                &self.target_rgba, &self.current_rgba,
+                rect.x0, rect.y0, rect.x1, rect.y1,
+            );
+        }
     }
 
     /// Merge multiple focus regions into a single bounding box (for multi-tile focus)
@@ -289,6 +350,258 @@ impl Engine {
         }
     }
 
+    /// Optimize colors of a specific polygon using parallel steepest descent with pyramid acceleration.
+    /// Returns (optimized_genome, final_rgba_premul, final_fitness, dirty_rect).
+    /// This is a PURE function - it does not modify Engine state.
+    /// Tiles are NOT used inside the optimizer (only at Engine level for full-image fitness).
+    /// The dirty_rect tracks the union of all accepted mutations for incremental tile updates.
+    fn optimize_colors_fast<F>(
+        &self,
+        genome: &Genome,
+        tri_idx: usize,
+        update_callback: &mut F,
+    ) -> (Genome, Vec<u8>, f64, Option<DirtyRect>)
+    where
+        F: FnMut(&Genome, &[u8], f64, bool),
+    {
+        profiling::scope!("optimize_colors_fast");
+
+        if tri_idx >= genome.polys.len() {
+            let rgba = CpuRenderer::render_rgba_premul(genome);
+            let fitness = sad_rgb_parallel(&self.target_rgba, &rgba, None);
+            return (genome.clone(), rgba, fitness, None);
+        }
+
+        let mut best = genome.clone();
+        let base_premul = CpuRenderer::render_up_to_poly_premul(&best, tri_idx);
+        let mut current_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&best, tri_idx, &base_premul);
+        let mut current_fitness = sad_rgb_parallel(&self.target_rgba, &current_render_premul, None);
+        let mut dirty: Option<DirtyRect> = None;
+
+        let step = self.cfg.color_step;
+        use crate::mutate::ColorDirection;
+        const DIRECTIONS: [ColorDirection; 10] = [
+            ColorDirection::Lighter,
+            ColorDirection::Darker,
+            ColorDirection::RedUp,
+            ColorDirection::BlueDown,
+            ColorDirection::GreenUp,
+            ColorDirection::RedDown,
+            ColorDirection::BlueUp,
+            ColorDirection::GreenDown,
+            ColorDirection::AlphaDown,
+            ColorDirection::AlphaUp,
+        ];
+
+        'outer: loop {
+            profiling::scope!("optimize_colors_fast_iteration");
+
+            let (x_min_old, y_min_old, x_max_old, y_max_old) =
+                poly_bounds_aa(&best.polys[tri_idx], self.width, self.height);
+
+            let results: Vec<_> = DIRECTIONS.par_iter().filter_map(|&direction| {
+                profiling::scope!("test_direction");
+
+                let mut candidate = best.clone();
+                let poly = Arc::make_mut(&mut candidate.polys[tri_idx]);
+                crate::mutate::apply_color_direction(&mut poly.rgba, direction, step, &self.cfg);
+                poly.rgba[3] = poly.rgba[3].clamp(self.cfg.alpha_min, self.cfg.alpha_max);
+
+                let (x_min_new, y_min_new, x_max_new, y_max_new) =
+                    poly_bounds_aa(&candidate.polys[tri_idx], self.width, self.height);
+
+                let x_min = x_min_old.min(x_min_new);
+                let y_min = y_min_old.min(y_min_new);
+                let x_max = x_max_old.max(x_max_new);
+                let y_max = y_max_old.max(y_max_new);
+
+                let cand_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&candidate, tri_idx, &base_premul);
+
+                // Pyramid gate: test at coarse resolutions first (fast rejection)
+                if self.cfg.use_pyramid_fitness {
+                    use crate::fitness::sad_rgb_rect_pyramid;
+                    let pyr_result = sad_rgb_rect_pyramid(
+                        &self.target_pyr,
+                        &cand_render_premul,
+                        self.width,
+                        x_min, y_min, x_max, y_max,
+                        Some(current_fitness as u64),
+                    );
+                    if pyr_result >= u64::MAX as f64 {
+                        return None; // Early abort from pyramid
+                    }
+                }
+
+                // Exact rect delta (no tiles - optimizer is stateless)
+                let sad_old_union = sad_rgb_rect(&self.target_rgba, &current_render_premul, x_min, y_min, x_max, y_max, self.width, None);
+                let sad_new_union = sad_rgb_rect(&self.target_rgba, &cand_render_premul, x_min, y_min, x_max, y_max, self.width, None);
+                let cand_fitness = current_fitness - sad_old_union + sad_new_union;
+
+                Some((direction, candidate, cand_render_premul, cand_fitness, x_min, y_min, x_max, y_max))
+            }).collect();
+
+            let best_result = results.iter()
+                .min_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
+
+            if let Some((_direction, candidate, cand_render_premul, cand_fitness, x_min, y_min, x_max, y_max)) = best_result {
+                if *cand_fitness < current_fitness {
+                    best = candidate.clone();
+                    crate::fitness::blit_rect(cand_render_premul, &mut current_render_premul, *x_min, *y_min, *x_max, *y_max, self.width);
+                    current_fitness = *cand_fitness;
+
+                    // Track dirty rect (union of all accepted mutations)
+                    let r = DirtyRect::new(*x_min, *y_min, *x_max, *y_max);
+                    dirty = Some(if let Some(d) = dirty { d.union(r) } else { r });
+
+                    // Throttled GUI update
+                    use std::sync::atomic::{AtomicU32, Ordering};
+                    static IMPROVEMENT_COUNTER: AtomicU32 = AtomicU32::new(0);
+                    let count = IMPROVEMENT_COUNTER.fetch_add(1, Ordering::AcqRel);
+                    if count % self.gui_update_rate == 0 {
+                        update_callback(&best, &current_render_premul, current_fitness, true);
+                    }
+
+                    continue 'outer;
+                }
+            }
+
+            break 'outer;
+        }
+
+        (best, current_render_premul, current_fitness, dirty)
+    }
+
+    /// Optimize shape of a specific polygon using parallel steepest descent with pyramid acceleration.
+    /// Returns (optimized_genome, final_rgba_premul, final_fitness, dirty_rect).
+    /// This is a PURE function - it does not modify Engine state.
+    /// Tiles are NOT used inside the optimizer (only at Engine level for full-image fitness).
+    /// The dirty_rect tracks the union of all accepted mutations for incremental tile updates.
+    fn optimize_shape_fast<F>(
+        &self,
+        genome: &Genome,
+        tri_idx: usize,
+        update_callback: &mut F,
+    ) -> (Genome, Vec<u8>, f64, Option<DirtyRect>)
+    where
+        F: FnMut(&Genome, &[u8], f64, bool),
+    {
+        profiling::scope!("optimize_shape_fast");
+
+        if tri_idx >= genome.polys.len() {
+            let rgba = CpuRenderer::render_rgba_premul(genome);
+            let fitness = sad_rgb_parallel(&self.target_rgba, &rgba, None);
+            return (genome.clone(), rgba, fitness, None);
+        }
+
+        let mut best = genome.clone();
+        let base_premul = CpuRenderer::render_up_to_poly_premul(&best, tri_idx);
+        let mut current_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&best, tri_idx, &base_premul);
+        let mut current_fitness = sad_rgb_parallel(&self.target_rgba, &current_render_premul, None);
+        let mut dirty: Option<DirtyRect> = None;
+
+        let step = self.cfg.pos_step;
+        let dirs: &[(f32, f32)] = &[(step, 0.0), (-step, 0.0), (0.0, step), (0.0, -step)];
+        let num_points = best.polys[tri_idx].points.len();
+        let mut tests = Vec::with_capacity(num_points * dirs.len());
+
+        'outer: loop {
+            profiling::scope!("optimize_shape_fast_iteration");
+
+            let (x_min_old, y_min_old, x_max_old, y_max_old) =
+                poly_bounds_aa(&best.polys[tri_idx], self.width, self.height);
+
+            tests.clear();
+            for vi in 0..num_points {
+                for &dir in dirs {
+                    tests.push((vi, dir));
+                }
+            }
+
+            let results: Vec<_> = tests.par_iter().filter_map(|&(vi, (dx, dy))| {
+                profiling::scope!("test_vertex_direction");
+
+                let mut candidate = best.clone();
+                let (mut x, mut y) = candidate.polys[tri_idx].points[vi];
+                x = (x + dx).clamp(0.0, (self.width as f32) - 1.0);
+                y = (y + dy).clamp(0.0, (self.height as f32) - 1.0);
+
+                let mut new_poly = (*candidate.polys[tri_idx]).clone();
+                new_poly.points[vi] = (x, y);
+
+                if self.cfg.enforce_simple_convex {
+                    let mut temp_points = new_poly.points.clone();
+                    if !crate::geom::sanitize_ccw_simple_convex(&mut temp_points) {
+                        return None;
+                    }
+                    new_poly.points = temp_points;
+                }
+
+                candidate.polys[tri_idx] = Arc::new(new_poly);
+
+                let (x_min_new, y_min_new, x_max_new, y_max_new) =
+                    poly_bounds_aa(&candidate.polys[tri_idx], self.width, self.height);
+
+                let x_min = x_min_old.min(x_min_new);
+                let y_min = y_min_old.min(y_min_new);
+                let x_max = x_max_old.max(x_max_new);
+                let y_max = y_max_old.max(y_max_new);
+
+                let cand_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&candidate, tri_idx, &base_premul);
+
+                // Pyramid gate (fast rejection)
+                if self.cfg.use_pyramid_fitness {
+                    use crate::fitness::sad_rgb_rect_pyramid;
+                    let pyr_result = sad_rgb_rect_pyramid(
+                        &self.target_pyr,
+                        &cand_render_premul,
+                        self.width,
+                        x_min, y_min, x_max, y_max,
+                        Some(current_fitness as u64),
+                    );
+                    if pyr_result >= u64::MAX as f64 {
+                        return None;
+                    }
+                }
+
+                // Exact rect delta (no tiles - optimizer is stateless)
+                let sad_old_union = sad_rgb_rect(&self.target_rgba, &current_render_premul, x_min, y_min, x_max, y_max, self.width, None);
+                let sad_new_union = sad_rgb_rect(&self.target_rgba, &cand_render_premul, x_min, y_min, x_max, y_max, self.width, None);
+                let cand_fitness = current_fitness - sad_old_union + sad_new_union;
+
+                Some((vi, (dx, dy), candidate, cand_render_premul, cand_fitness, x_min, y_min, x_max, y_max))
+            }).collect();
+
+            let best_result = results.iter()
+                .min_by(|a, b| a.4.partial_cmp(&b.4).unwrap_or(std::cmp::Ordering::Equal));
+
+            if let Some((_vi, _dir, candidate, cand_render_premul, cand_fitness, x_min, y_min, x_max, y_max)) = best_result {
+                if *cand_fitness < current_fitness {
+                    best = candidate.clone();
+                    crate::fitness::blit_rect(cand_render_premul, &mut current_render_premul, *x_min, *y_min, *x_max, *y_max, self.width);
+                    current_fitness = *cand_fitness;
+
+                    // Track dirty rect (union of all accepted mutations)
+                    let r = DirtyRect::new(*x_min, *y_min, *x_max, *y_max);
+                    dirty = Some(if let Some(d) = dirty { d.union(r) } else { r });
+
+                    // Throttled GUI update
+                    use std::sync::atomic::{AtomicU32, Ordering};
+                    static IMPROVEMENT_COUNTER: AtomicU32 = AtomicU32::new(0);
+                    let count = IMPROVEMENT_COUNTER.fetch_add(1, Ordering::AcqRel);
+                    if count % self.gui_update_rate == 0 {
+                        update_callback(&best, &current_render_premul, current_fitness, true);
+                    }
+
+                    continue 'outer;
+                }
+            }
+
+            break 'outer;
+        }
+
+        (best, current_render_premul, current_fitness, dirty)
+    }
+
     /// Update autofocus region by subdividing image into grid and finding tile with highest error.
     /// Matches Evolve's computeAutofocusFitness (widget.cpp:96-144).
     ///
@@ -336,13 +649,14 @@ impl Engine {
             (region, vec![idx])
         } else if self.autofocus_multi_tile_count > 1 {
             // Multi-tile: merge top K worst tiles
+            let k = self.autofocus_multi_tile_count as usize;
             let top_k: Vec<FocusRegion> = tiles
                 .iter()
-                .take(self.autofocus_multi_tile_count as usize)
+                .take(k)
                 .map(|(_, _, r)| *r)
                 .collect();
             let merged_region = Self::merge_regions(&top_k);
-            let indices: Vec<usize> = (0..self.autofocus_multi_tile_count as usize).collect();
+            let indices: Vec<usize> = (0..top_k.len()).collect();
             (merged_region, indices)
         } else {
             // Single-tile deterministic: always pick worst (default)
@@ -375,15 +689,28 @@ impl Engine {
             self.cfg.alpha_max,
             self.num_poly_points,
             self.focus_region.as_ref(),
+            self.cfg.enforce_simple_convex,
         );
 
-        // Test if adding it improves fitness
+        // Test if adding it improves fitness using AABB-scoped evaluation (massive speedup)
         let mut candidate = self.genome.clone();
         candidate.polys.push(Arc::new(poly));  // Wrap in Arc for copy-on-write
-        let candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
-        let candidate_fitness = sad_rgb_parallel(&self.target_rgba, &candidate_rgba);
 
-        if candidate_fitness < self.current_fitness {
+        // Compute AABB of the new polygon
+        let poly_idx = candidate.polys.len() - 1;
+        let (x_min, y_min, x_max, y_max) = poly_bounds_aa(&candidate.polys[poly_idx], self.genome.width, self.genome.height);
+
+        // Incremental rendering: render only the new polygon on top of current state
+        let candidate_rgba = CpuRenderer::render_from_poly_on_base_premul_fast(&candidate, poly_idx, &self.current_rgba);
+
+        // Compute SAD only over the new polygon's AABB (10-100× faster than full-frame)
+        let sad_new_bbox = sad_rgb_rect(&self.target_rgba, &candidate_rgba, x_min, y_min, x_max, y_max, self.genome.width, None);
+        let sad_old_bbox = sad_rgb_rect(&self.target_rgba, &self.current_rgba, x_min, y_min, x_max, y_max, self.genome.width, None);
+
+        // Delta fitness: subtract old AABB SAD, add new AABB SAD
+        let candidate_fitness = self.current_fitness - sad_old_bbox + sad_new_bbox;
+
+        if candidate_fitness <= self.current_fitness {
             // Accept the new polygon
             let poly_idx = candidate.polys.len() - 1;
             self.genome = candidate;
@@ -391,28 +718,22 @@ impl Engine {
 
             // Optimize the new polygon (matching Evolve's tryAddPoly lines 21-22)
             // The update_callback will be called during optimization to send UI updates
-            // The optimization functions return (genome, rgba, fitness) to avoid redundant renders
-            let (genome, rgba, fitness) = optimize_colors(
-                &self.genome,
-                poly_idx,
-                &self.target_rgba,
-                &[],  // current_rgba unused - optimizers render internally
-                &self.cfg,
-                update_callback,
-            );
+            // The optimization functions are stateless - we commit with incremental tile updates
+            let (genome, rgba, fitness, dirty) = self.optimize_colors_fast(&self.genome, poly_idx, update_callback);
             self.genome = genome;
-            self.update_current(rgba, fitness);
+            if let Some(rect) = dirty {
+                self.update_current_in_rect(rgba, fitness, rect);  // Only update affected tiles
+            } else {
+                self.update_current(rgba, fitness);  // Fallback (rare)
+            }
 
-            let (genome, rgba, fitness) = optimize_shape(
-                &self.genome,
-                poly_idx,
-                &self.target_rgba,
-                &[],  // current_rgba unused - optimizers render internally
-                &self.cfg,
-                update_callback,
-            );
+            let (genome, rgba, fitness, dirty) = self.optimize_shape_fast(&self.genome, poly_idx, update_callback);
             self.genome = genome;
-            self.update_current(rgba, fitness);
+            if let Some(rect) = dirty {
+                self.update_current_in_rect(rgba, fitness, rect);  // Only update affected tiles
+            } else {
+                self.update_current(rgba, fitness);  // Fallback (rare)
+            }
 
             true
         } else {
@@ -457,13 +778,14 @@ impl Engine {
     /// Reorder a random triangle (matches Evolve's reorderPoly).
     /// Optimizes the reordered triangle.
     /// If a focus region is set, ONLY reorders polygons in that region (strict focus discipline).
-    fn reorder_poly<F>(&mut self, candidate: &mut Genome, update_callback: &mut F)
+    /// Returns Some((rgba, fitness, dirty_rect)) if mutation occurred, None otherwise.
+    fn reorder_poly<F>(&mut self, candidate: &mut Genome, update_callback: &mut F) -> Option<(Vec<u8>, f64, Option<DirtyRect>)>
     where
         F: FnMut(&Genome, &[u8], f64, bool),
     {
         profiling::scope!("reorder_poly");
         if candidate.polys.len() < 2 {
-            return;
+            return None;
         }
 
         // If focus region is set, try to find a polygon in that region
@@ -479,7 +801,7 @@ impl Engine {
             // Strict focus discipline: skip mutation if no polygon found in region
             match found_idx {
                 Some(idx) => idx,
-                None => return,  // Skip this reorder - no suitable polygon in focus region
+                None => return None,  // Skip this reorder - no suitable polygon in focus region
             }
         } else {
             self.rng.random_range(0..candidate.polys.len())
@@ -490,39 +812,38 @@ impl Engine {
             let tri = candidate.polys.remove(src_idx);
             candidate.polys.insert(dst_idx, tri);
 
-            // Optimize the reordered triangle (matching Evolve's reorderPoly lines 72-73)
-            let (genome, _rgba, _fitness) = optimize_shape(
-                candidate,
-                dst_idx,
-                &self.target_rgba,
-                &[],  // current_rgba unused - optimizers render internally
-                &self.cfg,
-                update_callback,
-            );
-            *candidate = genome;
+            // Optimize the reordered triangle (pure evaluation - no Engine state mutation)
+            // Pass candidate as parameter, optimizers are stateless
+            let (g1, _rgba1, _fit1, dirty1) = self.optimize_shape_fast(candidate, dst_idx, update_callback);
+            let (g2, rgba2, fit2, dirty2) = self.optimize_colors_fast(&g1, dst_idx, update_callback);
 
-            let (genome, _rgba, _fitness) = optimize_colors(
-                candidate,
-                dst_idx,
-                &self.target_rgba,
-                &[],  // current_rgba unused - optimizers render internally
-                &self.cfg,
-                update_callback,
-            );
-            *candidate = genome;
+            // Union the dirty rects from both optimizations
+            let dirty_union = match (dirty1, dirty2) {
+                (Some(d1), Some(d2)) => Some(d1.union(d2)),
+                (Some(d), None) | (None, Some(d)) => Some(d),
+                (None, None) => None,
+            };
+
+            // Update candidate with optimized result
+            *candidate = g2;
+
+            // Return result with dirty rect - caller will commit via update_current_in_rect() if fitness improved
+            return Some((rgba2, fit2, dirty_union));
         }
+        None
     }
 
     /// Move a vertex of a random polygon (matches Evolve's movePoint).
     /// Optimizes the modified polygon.
     /// If a focus region is set, ONLY moves points of polygons in that region (strict focus discipline).
-    fn move_point<F>(&mut self, candidate: &mut Genome, update_callback: &mut F)
+    /// Returns Some((rgba, fitness, dirty_rect)) if mutation occurred, None otherwise.
+    fn move_point<F>(&mut self, candidate: &mut Genome, update_callback: &mut F) -> Option<(Vec<u8>, f64, Option<DirtyRect>)>
     where
         F: FnMut(&Genome, &[u8], f64, bool),
     {
         profiling::scope!("move_point");
         if candidate.polys.is_empty() {
-            return;
+            return None;
         }
 
         // If focus region is set, try to find a polygon in that region
@@ -538,7 +859,7 @@ impl Engine {
             // Strict focus discipline: skip mutation if no polygon found in region
             match found_idx {
                 Some(idx) => idx,
-                None => return,  // Skip this move_point - no suitable polygon in focus region
+                None => return None,  // Skip this move_point - no suitable polygon in focus region
             }
         } else {
             self.rng.random_range(0..candidate.polys.len())
@@ -546,7 +867,7 @@ impl Engine {
 
         let num_points = candidate.polys[poly_idx].points.len();
         if num_points == 0 {
-            return;
+            return None;
         }
 
         let vert_idx = self.rng.random_range(0..num_points);
@@ -562,28 +883,35 @@ impl Engine {
         // Clone impl resets cached_path automatically
         let mut new_poly = (*candidate.polys[poly_idx]).clone();
         new_poly.points[vert_idx] = (x, y);
+
+        // Validate geometry if enforcement enabled
+        if self.cfg.enforce_simple_convex {
+            let mut temp_points = new_poly.points.clone();
+            if !crate::geom::sanitize_ccw_simple_convex(&mut temp_points) {
+                return None; // Invalid - skip this mutation
+            }
+            new_poly.points = temp_points; // Accept any CCW fix from sanitize
+        }
+
         candidate.polys[poly_idx] = Arc::new(new_poly);
 
-        // Optimize the modified polygon (matching movePoint lines 94-95)
-        let (genome, _rgba, _fitness) = optimize_shape(
-            candidate,
-            poly_idx,
-            &self.target_rgba,
-            &[],  // current_rgba unused - optimizers render internally
-            &self.cfg,
-            update_callback,
-        );
-        *candidate = genome;
+        // Optimize the modified polygon (pure evaluation - no Engine state mutation)
+        // Pass candidate as parameter, optimizers are stateless
+        let (g1, _rgba1, _fit1, dirty1) = self.optimize_shape_fast(candidate, poly_idx, update_callback);
+        let (g2, rgba2, fit2, dirty2) = self.optimize_colors_fast(&g1, poly_idx, update_callback);
 
-        let (genome, _rgba, _fitness) = optimize_colors(
-            candidate,
-            poly_idx,
-            &self.target_rgba,
-            &[],  // current_rgba unused - optimizers render internally
-            &self.cfg,
-            update_callback,
-        );
-        *candidate = genome;
+        // Union the dirty rects from both optimizations
+        let dirty_union = match (dirty1, dirty2) {
+            (Some(d1), Some(d2)) => Some(d1.union(d2)),
+            (Some(d), None) | (None, Some(d)) => Some(d),
+            (None, None) => None,
+        };
+
+        // Update candidate with optimized result
+        *candidate = g2;
+
+        // Return result with dirty rect - caller will commit via update_current_in_rect() if fitness improved
+        Some((rgba2, fit2, dirty_union))
     }
 
     /// One evolution step matching Evolve's run() loop (widget.cpp:276-347).
@@ -612,7 +940,7 @@ impl Engine {
             };
             self.genome.polys.push(Arc::new(background));  // Wrap in Arc for copy-on-write
             let rgba = CpuRenderer::render_rgba_premul(&self.genome);
-            let fitness = sad_rgb_parallel(&self.target_rgba, &rgba);
+            let fitness = sad_rgb_parallel(&self.target_rgba, &rgba, None);
             self.update_current(rgba, fitness);
             return true;
         }
@@ -661,42 +989,52 @@ impl Engine {
                 .map(|&seed| self.generate_candidate(seed))
                 .collect();
 
-            // Find best candidate by fitness (compare field 2)
-            let best = candidates.iter()
-                .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-
-            // Accept if better than current (or equal - allows sideways moves)
-            // Use the already-rendered rgba to avoid redundant render (Perf B)
-            if let Some((best_genome, best_rgba, best_fitness)) = best {
-                if *best_fitness <= old_fitness {
-                    self.genome = best_genome.clone();
-                    self.update_current(best_rgba.clone(), *best_fitness);
+            // Find best candidate by fitness (move instead of clone to avoid copies)
+            if let Some((best_genome, best_rgba, best_fitness)) = candidates
+                .into_iter()
+                .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                if best_fitness <= old_fitness {
+                    self.genome = best_genome;
+                    self.update_current(best_rgba, best_fitness);
                 }
             }
         } else {
             // Original sequential evaluation (batch_size == 1)
             let mut candidate = self.genome.clone();
-            let mut candidate_rgba = self.current_rgba.clone();
+            let mut out_from_opt: Option<(Vec<u8>, f64, Option<DirtyRect>)> = None;
 
             if self.rng.random::<f32>() < self.cfg.p_remove && polys_size > self.cfg.min_tris {
                 self.remove_poly(&mut candidate);
-                candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
             }
 
             if self.rng.random::<f32>() < self.cfg.p_reorder {
-                self.reorder_poly(&mut candidate, update_callback);
-                candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
+                if let Some((rgba, fit, dirty)) = self.reorder_poly(&mut candidate, update_callback) {
+                    out_from_opt = Some((rgba, fit, dirty));
+                }
             }
 
             if self.rng.random::<f32>() < self.cfg.p_move_point {
-                self.move_point(&mut candidate, update_callback);
-                candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
+                if let Some((rgba, fit, dirty)) = self.move_point(&mut candidate, update_callback) {
+                    out_from_opt = Some((rgba, fit, dirty));
+                }
             }
 
-            let candidate_fitness = sad_rgb_parallel(&self.target_rgba, &candidate_rgba);
+            let (candidate_rgba, candidate_fitness, dirty_rect) = if let Some(t) = out_from_opt {
+                t
+            } else {
+                let rgba = CpuRenderer::render_rgba_premul(&candidate);
+                let fit = sad_rgb_parallel(&self.target_rgba, &rgba, Some(old_fitness as u64));
+                (rgba, fit, None)
+            };
             if candidate_fitness <= old_fitness {
                 self.genome = candidate;
-                self.update_current(candidate_rgba, candidate_fitness);
+                // Use incremental rect update if available, else full recompute
+                if let Some(rect) = dirty_rect {
+                    self.update_current_in_rect(candidate_rgba, candidate_fitness, rect);
+                } else {
+                    self.update_current(candidate_rgba, candidate_fitness);
+                }
             }
         }
 
@@ -709,7 +1047,8 @@ impl Engine {
         profiling::scope!("fitness_percent");
         let w = self.genome.width as u64;
         let h = self.genome.height as u64;
-        let worst_fitness = w * h * 3u64 * 255u64;
+        // Use 4 channels (RGBA) to match sad_rgb_parallel computation
+        let worst_fitness = w * h * 4u64 * 255u64;
         (100.0 - (self.current_fitness / worst_fitness as f64 * 100.0)) as f32
     }
 
@@ -722,6 +1061,7 @@ impl Engine {
         // Create thread-local RNG from seed
         let mut rng = Pcg32::seed_from_u64(seed);
         let mut candidate = self.genome.clone();
+        let mut changed = false;
 
         // Randomly apply mutations based on probabilities
         let polys_size = candidate.polys.len();
@@ -746,6 +1086,7 @@ impl Engine {
 
                 if let Some(idx) = idx {
                     candidate.polys.remove(idx);
+                    changed = true;
                 }
             }
         }
@@ -771,6 +1112,7 @@ impl Engine {
                 if src != dst {
                     let poly = candidate.polys.remove(src);
                     candidate.polys.insert(dst, poly);
+                    changed = true;
                 }
             }
         }
@@ -805,14 +1147,33 @@ impl Engine {
                     // Clone polygon and modify (OnceLock doesn't support invalidation)
                     let mut new_poly = (*candidate.polys[idx]).clone();
                     new_poly.points[vert_idx] = (x, y);
-                    candidate.polys[idx] = Arc::new(new_poly);
+
+                    // Validate geometry if enforcement enabled
+                    if self.cfg.enforce_simple_convex {
+                        let mut temp_points = new_poly.points.clone();
+                        if !crate::geom::sanitize_ccw_simple_convex(&mut temp_points) {
+                            // Invalid - skip this mutation (treat as no-op)
+                            // Don't set changed = true, so we'll return current state
+                        } else {
+                            new_poly.points = temp_points;
+                            candidate.polys[idx] = Arc::new(new_poly);
+                            changed = true;
+                        }
+                    } else {
+                        candidate.polys[idx] = Arc::new(new_poly);
+                        changed = true;
+                    }
                 }
             }
         }
 
+        if !changed {
+            // No-op candidate: reuse current buffers instead of re-rendering
+            return (self.genome.clone(), self.current_rgba.clone(), self.current_fitness);
+        }
         // Render and evaluate
         let candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
-        let candidate_fitness = sad_rgb_parallel(&self.target_rgba, &candidate_rgba);
+        let candidate_fitness = sad_rgb_parallel(&self.target_rgba, &candidate_rgba, Some(self.current_fitness as u64));
 
         (candidate, candidate_rgba, candidate_fitness)
     }
