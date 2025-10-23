@@ -210,7 +210,7 @@ where
             poly_bounds_aa(&best.polys[tri_idx], width, height);
 
         // Test ALL directions in parallel (each thread has its own rendering state via thread_local!)
-        let results: Vec<_> = DIRECTIONS.par_iter().map(|&direction| {
+        let results: Vec<_> = DIRECTIONS.par_iter().filter_map(|&direction| {
             profiling::scope!("test_direction");
 
             // Clone genome for this thread (Arc makes this cheap - just pointer copies)
@@ -235,27 +235,31 @@ where
             // Render candidate (thread-local SCRATCH_PIX means no contention!)
             let cand_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&candidate, tri_idx, &base_premul);
 
-            // Compute SAD over union in candidate state (use pyramid if enabled)
+            // Pyramid gate: early-abort if candidate worse at coarse levels
             let sad_new_union = if cfg.use_pyramid_fitness && pyramid.is_some() {
-                sad_rgb_rect_pyramid(pyramid.unwrap(), &cand_render_premul,
-                    width, x_min, y_min, x_max, y_max, None)
+                let pyr_result = sad_rgb_rect_pyramid(
+                    pyramid.unwrap(),
+                    &current_render_premul,  // old/current render
+                    &cand_render_premul,     // new/candidate render
+                    width,
+                    x_min, y_min, x_max, y_max,
+                );
+                if pyr_result.is_infinite() {
+                    return None; // Early abort - candidate worse at coarse level
+                }
+                pyr_result
             } else {
                 sad_rgb_rect(target_premul, &cand_render_premul,
                     x_min, y_min, x_max, y_max, width, None)
             };
 
-            // Correct delta: subtract current SAD over union, add candidate SAD over union
-            let sad_old_union = if cfg.use_pyramid_fitness && pyramid.is_some() {
-                sad_rgb_rect_pyramid(pyramid.unwrap(), &current_render_premul,
-                    width, x_min, y_min, x_max, y_max, None)
-            } else {
-                sad_rgb_rect(target_premul, &current_render_premul,
-                    x_min, y_min, x_max, y_max, width, None)
-            };
+            // Compute current SAD over union for delta calculation
+            let sad_old_union = sad_rgb_rect(target_premul, &current_render_premul,
+                x_min, y_min, x_max, y_max, width, None);
             let cand_fitness = current_fitness - sad_old_union + sad_new_union;
 
             // Return all info needed to accept this direction
-            (direction, candidate, cand_render_premul, cand_fitness, orig_rgba, x_min, y_min, x_max, y_max)
+            Some((direction, candidate, cand_render_premul, cand_fitness, orig_rgba, x_min, y_min, x_max, y_max))
         }).collect();
 
         // Find best improvement from parallel results
@@ -401,23 +405,27 @@ where
             // Render candidate (thread-local SCRATCH_PIX means no contention!)
             let cand_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&candidate, tri_idx, &base_premul);
 
-            // Compute SAD over union in candidate state (use pyramid if enabled)
+            // Pyramid gate: early-abort if candidate worse at coarse levels
             let sad_new_union = if cfg.use_pyramid_fitness && pyramid.is_some() {
-                sad_rgb_rect_pyramid(pyramid.unwrap(), &cand_render_premul,
-                    width, x_min, y_min, x_max, y_max, None)
+                let pyr_result = sad_rgb_rect_pyramid(
+                    pyramid.unwrap(),
+                    &current_render_premul,  // old/current render
+                    &cand_render_premul,     // new/candidate render
+                    width,
+                    x_min, y_min, x_max, y_max,
+                );
+                if pyr_result.is_infinite() {
+                    return None; // Early abort - candidate worse at coarse level
+                }
+                pyr_result
             } else {
                 sad_rgb_rect(target_premul, &cand_render_premul,
                     x_min, y_min, x_max, y_max, width, None)
             };
 
-            // Correct delta: subtract current SAD over union, add candidate SAD over union
-            let sad_old_union = if cfg.use_pyramid_fitness && pyramid.is_some() {
-                sad_rgb_rect_pyramid(pyramid.unwrap(), &current_render_premul,
-                    width, x_min, y_min, x_max, y_max, None)
-            } else {
-                sad_rgb_rect(target_premul, &current_render_premul,
-                    x_min, y_min, x_max, y_max, width, None)
-            };
+            // Compute current SAD over union for delta calculation
+            let sad_old_union = sad_rgb_rect(target_premul, &current_render_premul,
+                x_min, y_min, x_max, y_max, width, None);
             let cand_fitness = current_fitness - sad_old_union + sad_new_union;
 
             // Return all info needed to accept this mutation

@@ -317,71 +317,96 @@ pub fn sad_rgb_rect_pyr_level(
 }
 
 /// Coarse-to-fine SAD for a rect: test 1/4x → 1/2x → 1x with early abort
-/// If any level exceeds threshold, immediately return u64::MAX
-/// This accelerates optimization by cheaply rejecting bad proposals
+/// Compares candidate rect vs current rect at each pyramid level.
+/// If candidate is not better than current at any level, immediately returns f64::INFINITY.
+/// This accelerates optimization by cheaply rejecting bad proposals at coarse resolutions.
 pub fn sad_rgb_rect_pyramid(
     pyr: &GaussianPyramid,
-    current_full: &[u8],
+    current_old_full: &[u8],  // Current render before mutation
+    current_new_full: &[u8],  // Candidate render after mutation
     full_w: u32,
     x_min: u32,
     y_min: u32,
     x_max: u32,
     y_max: u32,
-    best_so_far: Option<u64>,
 ) -> f64 {
     profiling::scope!("sad_rgb_rect_pyramid");
 
     // Level 0: 1/4x (coarsest, fastest)
-    let s = sad_rgb_rect_pyr_level(
+    let sad_new_quarter = sad_rgb_rect_pyr_level(
         &pyr.levels[0],
         pyr.widths[0],
         pyr.heights[0],
         4,
-        current_full,
+        current_new_full,
         full_w,
         x_min,
         y_min,
         x_max,
         y_max,
-        best_so_far,
+        None,
     );
-    if let Some(t) = best_so_far {
-        if s >= t as f64 {
-            return u64::MAX as f64; // Early abort at 1/4x
-        }
+    let sad_old_quarter = sad_rgb_rect_pyr_level(
+        &pyr.levels[0],
+        pyr.widths[0],
+        pyr.heights[0],
+        4,
+        current_old_full,
+        full_w,
+        x_min,
+        y_min,
+        x_max,
+        y_max,
+        None,
+    );
+    if sad_new_quarter >= sad_old_quarter {
+        //println!("pyr abort @1/4x: new={:.0} ≥ old={:.0} rect=({},{})→({},{})", sad_new_quarter, sad_old_quarter, x_min, y_min, x_max, y_max);
+        return f64::INFINITY; // Early abort at 1/4x - candidate not better
     }
 
     // Level 1: 1/2x (medium detail)
-    let s = sad_rgb_rect_pyr_level(
+    let sad_new_half = sad_rgb_rect_pyr_level(
         &pyr.levels[1],
         pyr.widths[1],
         pyr.heights[1],
         2,
-        current_full,
+        current_new_full,
         full_w,
         x_min,
         y_min,
         x_max,
         y_max,
-        best_so_far,
+        None,
     );
-    if let Some(t) = best_so_far {
-        if s >= t as f64 {
-            return u64::MAX as f64; // Early abort at 1/2x
-        }
+    let sad_old_half = sad_rgb_rect_pyr_level(
+        &pyr.levels[1],
+        pyr.widths[1],
+        pyr.heights[1],
+        2,
+        current_old_full,
+        full_w,
+        x_min,
+        y_min,
+        x_max,
+        y_max,
+        None,
+    );
+    if sad_new_half >= sad_old_half {
+        //println!("pyr abort @1/2x: new={:.0} ≥ old={:.0} rect=({},{})→({},{})", sad_new_half, sad_old_half, x_min, y_min, x_max, y_max);
+        return f64::INFINITY; // Early abort at 1/2x - candidate not better
     }
 
     // Level 2: 1x (full resolution, exact)
     // Use existing optimized AVX2/scalar sad_rgb_rect for final measurement
     sad_rgb_rect(
         &pyr.levels[2],
-        current_full,
+        current_new_full,
         x_min,
         y_min,
         x_max,
         y_max,
         full_w,
-        best_so_far,
+        None,
     )
 }
 
@@ -670,8 +695,8 @@ impl TileGrid {
     ) -> (u64, bool) {
         profiling::scope!("TileGrid::delta_for_rect");
 
-        // Start with current total error
-        let mut total = self.errs.iter().copied().sum::<u64>();
+        // Start with cached total error
+        let mut total = self.total_err;
 
         // Find tiles overlapped by the rect
         let (tx0, ty0, tx1, ty1) = self.tile_rect(w, h, x0, y0, x1, y1);
@@ -690,7 +715,9 @@ impl TileGrid {
                 total -= old_e;
 
                 // Add new tile contribution (recomputed against new buffer)
-                let new_e = sad_rgb_rect(target, current_new, x_tile, y_tile, x_max, y_max, w, None) as u64;
+                // Pass remaining budget so sad_rgb_rect can short-circuit inside the tile
+                let budget = best_so_far.map(|threshold| threshold.saturating_sub(total));
+                let new_e = sad_rgb_rect(target, current_new, x_tile, y_tile, x_max, y_max, w, budget) as u64;
                 total += new_e;
 
                 // Early exit if we already exceed best_so_far

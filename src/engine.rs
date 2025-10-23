@@ -424,13 +424,13 @@ impl Engine {
                     use crate::fitness::sad_rgb_rect_pyramid;
                     let pyr_result = sad_rgb_rect_pyramid(
                         &self.target_pyr,
-                        &cand_render_premul,
+                        &current_render_premul,  // old/current render
+                        &cand_render_premul,     // new/candidate render
                         self.width,
                         x_min, y_min, x_max, y_max,
-                        Some(current_fitness as u64),
                     );
-                    if pyr_result >= u64::MAX as f64 {
-                        return None; // Early abort from pyramid
+                    if pyr_result.is_infinite() {
+                        return None; // Early abort from pyramid - candidate worse at coarse level
                     }
                 }
 
@@ -555,13 +555,13 @@ impl Engine {
                     use crate::fitness::sad_rgb_rect_pyramid;
                     let pyr_result = sad_rgb_rect_pyramid(
                         &self.target_pyr,
-                        &cand_render_premul,
+                        &current_render_premul,  // old/current render
+                        &cand_render_premul,     // new/candidate render
                         self.width,
                         x_min, y_min, x_max, y_max,
-                        Some(current_fitness as u64),
                     );
-                    if pyr_result >= u64::MAX as f64 {
-                        return None;
+                    if pyr_result.is_infinite() {
+                        return None; // Early abort from pyramid - candidate worse at coarse level
                     }
                 }
 
