@@ -150,6 +150,8 @@ pub fn compute_tile_errors_by_mode(
     max_depth: u32,
     error_threshold: f64,
     fitness_percent: f32,
+    metrics_mode: crate::settings::MetricsMode,
+    psnr: f64,
 ) -> Vec<(usize, f64, FocusRegion)> {
     use crate::settings::AutofocusMode;
 
@@ -168,6 +170,8 @@ pub fn compute_tile_errors_by_mode(
                 max_depth,
                 error_threshold,
                 fitness_percent,
+                metrics_mode,
+                psnr,
             )
         }
         AutofocusMode::BSPTree => {
@@ -182,6 +186,8 @@ pub fn compute_tile_errors_by_mode(
                 max_tiles,
                 error_threshold,
                 fitness_percent,
+                metrics_mode,
+                psnr,
             )
         }
     }

@@ -94,6 +94,7 @@ struct EngineUpdate {
     autofocus_tiles: Option<Vec<(usize, f64, FocusRegion)>>,  // (tile_idx, error, region) - sent when autofocus updates
     focus_region: Option<FocusRegion>,  // actual region being used by engine for mutations
     focus_tile_indices: Option<Vec<usize>>,  // indices of tiles that contributed to focus_region
+    metrics: crate::fitness::MetricsSnapshot,  // resolution-invariant metrics (PSNR, SAD/px)
 }
 
 pub struct MiraiApp {
@@ -116,6 +117,7 @@ pub struct MiraiApp {
     generation: u64,
     fitness: f32,
     triangles: usize,
+    metrics: crate::fitness::MetricsSnapshot,  // resolution-invariant metrics
 
     // focus region for targeted evolution
     focus_region: Option<FocusRegion>,
@@ -158,6 +160,7 @@ impl MiraiApp {
             generation: 0,
             fitness: 0.0,
             triangles: 0,
+            metrics: crate::fitness::MetricsSnapshot::default(),
             focus_region: None,
             drag_start: None,
             autofocus_tiles: None,
@@ -220,9 +223,10 @@ impl MiraiApp {
                         generation: engine.generation,
                         fitness: engine.fitness_percent_normalized(),
                         triangles: engine.genome.polys.len(),
-                        autofocus_tiles: None,  
-                        focus_region: None,  
-                        focus_tile_indices: None,  
+                        autofocus_tiles: None,
+                        focus_region: None,
+                        focus_tile_indices: None,
+                        metrics: engine.last_metrics,
                     });
 
                     loop {
@@ -269,9 +273,22 @@ impl MiraiApp {
 
                             let baseline = engine.baseline_fitness;
                             let current_generation = engine.generation;
+                            let img_width = engine.width;
+                            let img_height = engine.height;
+                            let psnr_peak = engine.metrics_settings.psnr_peak;
 
                             let mut update_callback = |_genome: &crate::dna::Genome, rgba: &[u8], fitness_val: f64, _improved: bool| {
                                 let fitness_percent = crate::engine::Engine::fitness_percent_from_baseline(baseline, fitness_val);
+
+                                // Compute metrics snapshot from fitness_val
+                                let sad = fitness_val;
+                                let sad_px = crate::fitness::sad_per_pixel(sad, img_width, img_height);
+                                let mse = crate::fitness::pseudo_mse_from_sad(sad, img_width, img_height, crate::fitness::RGBA_CHANNELS);
+                                let psnr = crate::fitness::psnr_from_mse(mse, psnr_peak);
+                                let metrics = crate::fitness::MetricsSnapshot {
+                                    sad_per_px: sad_px,
+                                    psnr,
+                                };
 
                                 // send incremental update (throttled by counter in optimization functions)
                                 // rgba from optimizer callback is already unpremul, no conversion needed
@@ -283,6 +300,7 @@ impl MiraiApp {
                                     autofocus_tiles: None,
                                     focus_region: None,
                                     focus_tile_indices: None,
+                                    metrics,
                                 });
                                 ctx_clone_inner.request_repaint();
                             };
@@ -309,6 +327,7 @@ impl MiraiApp {
                                 autofocus_tiles,
                                 focus_region: engine.focus_region,
                                 focus_tile_indices,
+                                metrics: engine.last_metrics,
                             });
                             ctx_clone.request_repaint();
                         } else {
@@ -584,6 +603,7 @@ impl MiraiApp {
                 self.generation = update.generation;
                 self.fitness = update.fitness;
                 self.triangles = update.triangles;
+                self.metrics = update.metrics;
 
                 // throttled texture upload: only upload if enough time has elapsed OR counter threshold reached
                 if self.upload_gate.should_upload() {
@@ -1085,6 +1105,59 @@ impl MiraiApp {
                             });
                         });
 
+                    // 📈 Metrics & Termination
+                    egui::CollapsingHeader::new(egui::RichText::new("📈 Metrics & Termination").heading())
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("Resolution-Invariant Error Metrics")
+                                .color(egui::Color32::from_rgb(200, 150, 100))
+                                .small());
+                            ui.add_space(5.0);
+
+                            // metrics mode selection
+                            ui.horizontal(|ui| {
+                                ui.label("Display Mode:");
+                                ui.radio_value(&mut self.settings.metrics_settings.mode,
+                                    crate::settings::MetricsMode::ResolutionInvariant, "PSNR/SAD-px");
+                                ui.radio_value(&mut self.settings.metrics_settings.mode,
+                                    crate::settings::MetricsMode::Percentage, "Percentage");
+                            });
+                            ui.label("  PSNR mode is recommended (resolution-invariant)");
+                            ui.add_space(10.0);
+
+                            ui.separator();
+                            ui.label(egui::RichText::new("Termination Conditions").strong());
+                            ui.add_space(5.0);
+
+                            // PSNR target
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.settings.termination_settings.enable_target_psnr, "Stop at PSNR:");
+                                ui.add(egui::Slider::new(&mut self.settings.metrics_settings.target_psnr, 20.0..=50.0)
+                                    .suffix(" dB"));
+                            });
+                            ui.label("  30 dB = acceptable, 35 dB = good, 40+ dB = very good");
+                            ui.add_space(5.0);
+
+                            // SAD per pixel threshold
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.settings.termination_settings.enable_sad_per_px_stop, "Stop at SAD/px:");
+                                ui.add(egui::Slider::new(&mut self.settings.metrics_settings.sad_per_px_stop, 0.1..=10.0));
+                            });
+                            ui.label("  < 2.0 = converged, < 5.0 = good");
+                            ui.add_space(5.0);
+
+                            ui.separator();
+                            ui.label(egui::RichText::new("Advanced").strong());
+                            ui.add_space(5.0);
+
+                            // PSNR peak value
+                            ui.horizontal(|ui| {
+                                ui.label("PSNR Peak Value:");
+                                ui.add(egui::Slider::new(&mut self.settings.metrics_settings.psnr_peak, 1.0..=255.0));
+                            });
+                            ui.label("  255.0 for 8-bit images, 1.0 for normalized [0,1]");
+                        });
+
                     // keyboard shortcuts reference
                     ui.add_space(15.0);
                     ui.separator();
@@ -1306,7 +1379,20 @@ impl eframe::App for MiraiApp {
                 if self.command_tx.is_some() {
                     ui.label(format!("Generation: {}", self.generation));
                     ui.separator();
-                    ui.label(format!("Fitness: {:.2}%", self.fitness));
+
+                    // Display metrics based on mode (matching bottom status bar)
+                    match self.settings.metrics_settings.mode {
+                        crate::settings::MetricsMode::ResolutionInvariant => {
+                            ui.label(format!("PSNR*: {:.2} dB", self.metrics.psnr))
+                                .on_hover_text("*PSNR approximated from L1 (SAD), not true L2");
+                            ui.separator();
+                            ui.label(format!("SAD/px: {:.2}", self.metrics.sad_per_px));
+                        }
+                        crate::settings::MetricsMode::Percentage => {
+                            ui.label(format!("Fitness: {:.2}%", self.fitness));
+                        }
+                    }
+
                     ui.separator();
                     ui.label(format!("Polygons: {}", self.triangles));
                 }
@@ -1385,8 +1471,24 @@ impl eframe::App for MiraiApp {
             ui.horizontal(|ui| {
                 // left: session info
                 if self.command_tx.is_some() {
-                    ui.label(format!("Gen: {} | Fitness: {:.2}% | Triangles: {}",
-                        self.generation, self.fitness, self.triangles));
+                    // Display metrics based on mode
+                    match self.settings.metrics_settings.mode {
+                        crate::settings::MetricsMode::ResolutionInvariant => {
+                            ui.label(format!("Gen: {} | PSNR*: {:.2} dB | SAD/px: {:.2} | Polys: {}",
+                                self.generation, self.metrics.psnr, self.metrics.sad_per_px, self.triangles))
+                                .on_hover_text("*PSNR approximated from L1 (SAD), not true L2");
+                            ui.separator();
+                            ui.weak(format!("({:.2}%)", self.fitness));
+                        }
+                        crate::settings::MetricsMode::Percentage => {
+                            ui.label(format!("Gen: {} | Fitness: {:.2}% | Triangles: {}",
+                                self.generation, self.fitness, self.triangles));
+                            ui.separator();
+                            ui.weak(format!("PSNR*: {:.2} dB, SAD/px: {:.2}",
+                                self.metrics.psnr, self.metrics.sad_per_px))
+                                .on_hover_text("*PSNR approximated from L1 (SAD), not true L2");
+                        }
+                    }
                 } else {
                     ui.label("No active session");
                 }
