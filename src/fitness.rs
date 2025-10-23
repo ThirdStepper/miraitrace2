@@ -687,3 +687,46 @@ impl TileGrid {
         }
     }
 }
+
+//─────────────────────────────────────────────────────────────────────────────
+// Resolution-Invariant Metrics (SAD/px, MSE, PSNR)
+//─────────────────────────────────────────────────────────────────────────────
+
+/// Number of channels in RGBA format (future-proof for potential format changes)
+pub const RGBA_CHANNELS: u32 = 4;
+
+/// Resolution-invariant SAD: normalizes absolute error by total pixel count.
+/// Use this instead of raw SAD to compare images of different sizes.
+#[inline]
+pub fn sad_per_pixel(sad: f64, w: u32, h: u32) -> f64 {
+    sad / ((w as f64) * (h as f64))
+}
+
+/// Pseudo-MSE derived from SAD (not true MSE).
+/// NOTE: True MSE requires SSE (sum of squared errors). This is a placeholder
+/// for API symmetry. Once SSE is available, replace with: SSE / (w * h * channels).
+#[inline]
+pub fn pseudo_mse_from_sad(sad: f64, w: u32, h: u32, channels: u32) -> f64 {
+    sad_per_pixel(sad, w, h) / (channels as f64).max(1.0)
+}
+
+/// PSNR (Peak Signal-to-Noise Ratio) in decibels.
+/// - `mse`: Mean Squared Error (or pseudo-MSE from SAD)
+/// - `peak`: 255.0 for 8-bit images, 1.0 for normalized [0,1] range
+/// Higher PSNR = better quality. Typical ranges:
+///   - 30 dB = acceptable
+///   - 35 dB = good
+///   - 40+ dB = very good
+#[inline]
+pub fn psnr_from_mse(mse: f64, peak: f64) -> f64 {
+    let mse = mse.max(1e-12); // avoid division by zero
+    10.0 * ((peak * peak) / mse).log10()
+}
+
+/// Cached snapshot of resolution-invariant metrics.
+/// Computed from raw SAD and image dimensions.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MetricsSnapshot {
+    pub sad_per_px: f64,   // SAD normalized by pixel count
+    pub psnr: f64,         // PSNR in decibels
+}

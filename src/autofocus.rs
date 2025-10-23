@@ -15,6 +15,8 @@ use rayon::prelude::*;
 /// - max_depth: Maximum recursion depth (4 = up to 256 tiles, 5 = 1024 tiles)
 /// - error_threshold: Split if SAD > threshold (0.0 = auto-compute)
 /// - fitness_percent: Current fitness (0-100) for adaptive threshold scaling
+/// - metrics_mode: Percentage or ResolutionInvariant
+/// - psnr: Current PSNR in dB (for ResolutionInvariant mode)
 pub fn compute_tiles_quadtree(
     target: &[u8],
     current: &[u8],
@@ -23,13 +25,15 @@ pub fn compute_tiles_quadtree(
     max_depth: u32,
     error_threshold: f64,
     fitness_percent: f32,
+    metrics_mode: crate::settings::MetricsMode,
+    psnr: f64,
 ) -> Vec<(usize, f64, FocusRegion)> {
     profiling::scope!("compute_tiles_quadtree");
 
     let threshold = if error_threshold > 0.0 {
         error_threshold
     } else {
-        compute_auto_threshold(target, current, width, height, "quadtree", fitness_percent)
+        compute_auto_threshold(target, current, width, height, "quadtree", metrics_mode, fitness_percent, psnr)
     };
 
     let mut tiles = Vec::new();
@@ -127,6 +131,8 @@ fn quadtree_recursive(
 /// - max_tiles: Stop when this many tiles are created (use grid_size² from settings)
 /// - error_threshold: Split if SAD > threshold (0.0 = auto-compute)
 /// - fitness_percent: Current fitness (0-100) for adaptive threshold scaling
+/// - metrics_mode: Percentage or ResolutionInvariant
+/// - psnr: Current PSNR in dB (for ResolutionInvariant mode)
 pub fn compute_tiles_bsp(
     target: &[u8],
     current: &[u8],
@@ -135,6 +141,8 @@ pub fn compute_tiles_bsp(
     max_tiles: u32,
     error_threshold: f64,
     fitness_percent: f32,
+    metrics_mode: crate::settings::MetricsMode,
+    psnr: f64,
 ) -> Vec<(usize, f64, FocusRegion)> {
     profiling::scope!("compute_tiles_bsp");
 
@@ -142,7 +150,7 @@ pub fn compute_tiles_bsp(
     let threshold = if error_threshold > 0.0 {
         error_threshold
     } else {
-        compute_auto_threshold(target, current, width, height, "bsp", fitness_percent)
+        compute_auto_threshold(target, current, width, height, "bsp", metrics_mode, fitness_percent, psnr)
     };
 
     // start with full image as single tile
@@ -251,13 +259,19 @@ fn is_region_too_small(region: &FocusRegion, width: u32, height: u32) -> bool {
 /// - quadtree mode: Uses mean + multiplier*stddev (per-region checks)
 /// BSP uses max because it checks worst tile globally as stop condition
 /// quadtree uses mean because it checks each region independently
+///
+/// Supports two metrics modes:
+/// - Percentage: Uses fitness_percent (legacy, 0-100%)
+/// - ResolutionInvariant: Uses PSNR thresholds (recommended)
 fn compute_auto_threshold(
     target: &[u8],
     current: &[u8],
     width: u32,
     height: u32,
     mode: &str,
+    metrics_mode: crate::settings::MetricsMode,
     fitness_percent: f32,
+    psnr: f64,
 ) -> f64 {
     profiling::scope!("compute_auto_threshold");
 
@@ -278,68 +292,65 @@ fn compute_auto_threshold(
         })
         .collect();
 
+    // Compute base threshold stats
+    let max_error = errors.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let mean = errors.iter().sum::<f64>() / errors.len() as f64;
+    let variance = errors.iter()
+        .map(|e| {
+            let diff = e - mean;
+            diff * diff
+        })
+        .sum::<f64>() / errors.len() as f64;
+    let stddev = variance.sqrt().max(1e-9); // Guard against zero variance (uniform error across tiles)
+
+    // Determine multiplier based on metrics mode
+    let multiplier = match metrics_mode {
+        crate::settings::MetricsMode::ResolutionInvariant => {
+            // PSNR-based thresholds (resolution-invariant, recommended)
+            // Higher PSNR = better quality = more aggressive (lower multiplier)
+            if psnr >= 35.0 {
+                0.3   // >= 35 dB: Very fine refinement
+            } else if psnr >= 30.0 {
+                0.4   // 30-35 dB: Fine tuning
+            } else if psnr >= 25.0 {
+                0.5   // 25-30 dB: Moderate optimization
+            } else {
+                0.7   // < 25 dB: Aggressive exploration
+            }
+        }
+        crate::settings::MetricsMode::Percentage => {
+            // Percentage-based thresholds (legacy)
+            // Higher percent = better = more aggressive (lower multiplier)
+            if fitness_percent >= 95.0 {
+                0.3
+            } else if fitness_percent >= 90.0 {
+                0.4
+            } else if fitness_percent >= 87.0 {
+                0.45
+            } else if fitness_percent >= 85.0 {
+                0.5
+            } else if fitness_percent >= 80.0 {
+                0.6
+            } else if fitness_percent >= 70.0 {
+                0.7
+            } else {
+                0.85
+            }
+        }
+    };
+
+    // Apply multiplier based on algorithm mode
     match mode {
         "bsp" => {
             // BSP: Use max-based threshold (fraction of worst sampled error)
-            // BSP checks "worst tile < threshold" as global stop, so threshold must be
-            // relative to actual worst-case errors, not average
-            let max_error = errors.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
-            // multiplier = fraction of max error to use as threshold
-            // higher multiplier = higher threshold = more subdivision before stopping
-            // lower fitness = higher multiplier to allow more adaptive subdivision early on
-            let multiplier = if fitness_percent >= 95.0 {
-                0.3   // 95-100%: Keep splitting until worst tile reaches 30% of max
-            } else if fitness_percent >= 90.0 {
-                0.4   // 90-95%: Stop at 40% of max
-            } else if fitness_percent >= 87.0 {
-                0.45  // 87-90%
-            } else if fitness_percent >= 85.0 {
-                0.5   // 85-87%: Stop at 50% of max
-            } else if fitness_percent >= 80.0 {
-                0.6   // 80-85%
-            } else if fitness_percent >= 70.0 {
-                0.7   // 70-80%: More aggressive early subdivision
-            } else {
-                0.85  // 0-70%: Very aggressive - keep splitting until worst tile reaches 85% of max error
-            };
-
             max_error * multiplier
         }
         "quadtree" => {
             // quadtree: Use mean-based threshold (per-region adaptive)
-            // quadtree checks each region independently, so mean+stddev works well
-            let mean = errors.iter().sum::<f64>() / errors.len() as f64;
-            let variance = errors.iter()
-                .map(|e| {
-                    let diff = e - mean;
-                    diff * diff
-                })
-                .sum::<f64>() / errors.len() as f64;
-            let stddev = variance.sqrt();
-
-            // Lower multiplier = lower threshold = more aggressive subdivision
-            // Use lower multipliers at low fitness to encourage adaptive subdivision early
-            let multiplier = if fitness_percent >= 95.0 {
-                0.3   // 95-100%: Very aggressive
-            } else if fitness_percent >= 85.0 {
-                0.4   // 85-95%: Aggressive
-            } else {
-                0.3   // 0-85%: Very aggressive to promote early adaptive subdivision
-            };
-
             mean + multiplier * stddev
         }
         _ => {
             // Fallback: use mean-based
-            let mean = errors.iter().sum::<f64>() / errors.len() as f64;
-            let variance = errors.iter()
-                .map(|e| {
-                    let diff = e - mean;
-                    diff * diff
-                })
-                .sum::<f64>() / errors.len() as f64;
-            let stddev = variance.sqrt();
             mean + 0.5 * stddev
         }
     }

@@ -41,6 +41,48 @@ impl PolygonArityMode {
     }
 }
 
+/// Metrics display and behavior mode
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MetricsMode {
+    /// Legacy percentage-based display (0-100%, normalized by baseline)
+    Percentage,
+    /// Resolution-invariant metrics (PSNR, SAD/px) - recommended
+    ResolutionInvariant,
+}
+
+/// Metrics configuration for resolution-invariant error tracking
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct MetricsSettings {
+    /// Display mode: Percentage vs ResolutionInvariant
+    pub mode: MetricsMode,
+    /// Peak value for PSNR calculation (255.0 for 8-bit, 1.0 for normalized [0,1])
+    pub psnr_peak: f64,
+    /// Target PSNR for termination (e.g., 35.0 dB = good quality)
+    pub target_psnr: f64,
+    /// Target SAD-per-pixel for termination (e.g., 2.0 = converged)
+    pub sad_per_px_stop: f64,
+}
+
+impl Default for MetricsSettings {
+    fn default() -> Self {
+        Self {
+            mode: MetricsMode::ResolutionInvariant,
+            psnr_peak: 255.0,        // 8-bit RGBA
+            target_psnr: 35.0,       // "good" quality threshold
+            sad_per_px_stop: 2.0,    // converged threshold
+        }
+    }
+}
+
+/// Termination condition flags
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct TerminationSettings {
+    /// Stop when PSNR >= target_psnr
+    pub enable_target_psnr: bool,
+    /// Stop when SAD-per-pixel <= sad_per_px_stop
+    pub enable_sad_per_px_stop: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {
     // UI/Rendering Settings
@@ -126,6 +168,12 @@ pub struct AppSettings {
     pub tile_auto: bool,
     /// Manual tile size override (only used when tile_auto = false, range 16-128)
     pub tile_size: u32,
+
+    // Metrics & Termination
+    /// Resolution-invariant metrics configuration (PSNR, SAD/px)
+    pub metrics_settings: MetricsSettings,
+    /// Termination condition flags (PSNR target, SAD/px threshold)
+    pub termination_settings: TerminationSettings,
 }
 
 impl Default for AppSettings {
@@ -183,6 +231,13 @@ impl Default for AppSettings {
             use_tiled_fitness: true,    // Enabled by default (minimal overhead, significant speedup)
             tile_auto: true,            // Auto tile size (recommended)
             tile_size: 64,              // Fallback when manual (typical default)
+
+            // Metrics & Termination
+            metrics_settings: MetricsSettings::default(),
+            termination_settings: TerminationSettings {
+                enable_target_psnr: true,       // Stop at target PSNR (35.0 dB)
+                enable_sad_per_px_stop: true,   // Stop at SAD/px threshold (2.0)
+            },
         }
     }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use crate::dna::{Genome, Polygon};
-use crate::fitness::{sad_rgb_parallel, sad_rgb_rect, poly_bounds_aa, build_pyramid_rgba, GaussianPyramid, TileGrid};
+use crate::fitness::{sad_rgb_parallel, sad_rgb_rect, poly_bounds_aa, build_pyramid_rgba, GaussianPyramid, TileGrid, RGBA_CHANNELS};
 use crate::mutate::MutateConfig;
 use crate::render::CpuRenderer;
 use crate::analysis::find_dominant_color;
@@ -41,6 +41,10 @@ pub struct Engine {
     pub autofocus_probabilistic: bool,      // Probabilistic vs. deterministic worst-first
     pub autofocus_progressive: bool,        // Progressive grid refinement
     pub gui_update_rate: u32,               // How often to update progressive params (default: 4)
+    // Resolution-Invariant Metrics
+    pub metrics_settings: crate::settings::MetricsSettings,     // PSNR, SAD/px config
+    pub termination_settings: crate::settings::TerminationSettings, // Stop conditions
+    pub last_metrics: crate::fitness::MetricsSnapshot,          // Cached metrics snapshot
 }
 
 impl Engine {
@@ -82,7 +86,7 @@ impl Engine {
         // Save max_vertices before cfg is moved
         let initial_poly_points = cfg.max_vertices;
 
-        Self {
+        let mut this = Self {
             rng,
             cfg,
             genome,
@@ -112,7 +116,15 @@ impl Engine {
             autofocus_probabilistic: false, // Deterministic worst-first
             autofocus_progressive: true,    // Dynamic progressive refinement (default)
             gui_update_rate: 4,             // Update progressive params every 4 generations
-        }
+            // Resolution-Invariant Metrics
+            metrics_settings: crate::settings::MetricsSettings::default(),
+            termination_settings: crate::settings::TerminationSettings::default(),
+            last_metrics: crate::fitness::MetricsSnapshot::default(),
+        };
+
+        // Seed resolution-invariant metrics for frame 0 (UI and termination logic need valid values immediately)
+        this.update_metrics_snapshot();
+        this
     }
 
     /// Update the number of polygon points based on current polygon count (matches Evolve's progressive detail).
@@ -147,6 +159,8 @@ impl Engine {
         if let Some(ref mut tg) = self.tile_grid {
             tg.recompute_all(self.width, self.height, &self.target_rgba, &self.current_rgba);
         }
+        // Update resolution-invariant metrics
+        self.update_metrics_snapshot();
     }
 
     /// Helper to update current_rgba and fitness with incremental tile update.
@@ -164,6 +178,8 @@ impl Engine {
                 rect.x0, rect.y0, rect.x1, rect.y1,
             );
         }
+        // Update resolution-invariant metrics
+        self.update_metrics_snapshot();
     }
 
     /// Merge multiple focus regions into a single bounding box (for multi-tile focus)
@@ -642,6 +658,8 @@ impl Engine {
             self.autofocus_max_depth,
             self.autofocus_error_threshold,
             fitness_pct,
+            self.metrics_settings.mode,
+            self.last_metrics.psnr,
         );
 
         // Store for UI visualization
@@ -1044,6 +1062,21 @@ impl Engine {
         }
 
         self.generation += 1;
+
+        // Check termination conditions based on resolution-invariant metrics
+        if self.termination_settings.enable_target_psnr
+            && self.last_metrics.psnr.is_finite()
+            && self.last_metrics.psnr >= self.metrics_settings.target_psnr
+        {
+            return false; // Target PSNR reached - signal termination
+        }
+
+        if self.termination_settings.enable_sad_per_px_stop
+            && self.last_metrics.sad_per_px <= self.metrics_settings.sad_per_px_stop
+        {
+            return false; // SAD/px threshold reached - signal termination
+        }
+
         true
     }
 
@@ -1064,6 +1097,21 @@ impl Engine {
         let denom = if baseline > 0.0 { baseline } else { std::f64::EPSILON };
         let pct = (1.0 - (current / denom)) * 100.0;
         pct.clamp(0.0, 100.0) as f32
+    }
+
+    /// Update cached metrics snapshot (SAD/px, pseudo-MSE, PSNR)
+    /// Call this after fitness updates to keep metrics in sync.
+    pub fn update_metrics_snapshot(&mut self) {
+        profiling::scope!("update_metrics_snapshot");
+        let sad = self.current_fitness;
+        let sad_px = crate::fitness::sad_per_pixel(sad, self.width, self.height);
+        let mse = crate::fitness::pseudo_mse_from_sad(sad, self.width, self.height, RGBA_CHANNELS);
+        let psnr = crate::fitness::psnr_from_mse(mse, self.metrics_settings.psnr_peak);
+
+        self.last_metrics = crate::fitness::MetricsSnapshot {
+            sad_per_px: sad_px,
+            psnr,
+        };
     }
 
     /// Generate a random mutation and return a candidate genome with fitness + render
