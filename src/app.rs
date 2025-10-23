@@ -370,7 +370,7 @@ impl MiraiApp {
                 &img_buf,
                 new_w,
                 new_h,
-                image::imageops::FilterType::Triangle, // fast bilinear-like filter TODO: give the user an option to select which filter
+                image::imageops::FilterType::CatmullRom, // fast bilinear-like filter TODO: give the user an option to select which filter
             );
 
             (new_w as usize, new_h as usize, resized.into_raw())
