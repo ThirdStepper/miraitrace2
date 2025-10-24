@@ -279,20 +279,18 @@ impl MiraiApp {
                             let update_tx_clone = update_tx.clone();
                             let ctx_clone_inner = ctx_clone.clone();
 
-                            let _baseline = engine.baseline_fitness;  // Kept for future use
+                            let baseline = engine.baseline_fitness;  // For percent normalization
                             let current_generation = engine.generation;
                             let img_width = engine.width;
                             let img_height = engine.height;
                             let psnr_peak = engine.metrics_settings.psnr_peak;
-                            let avg_weight = engine.avg_weight_q8;  // For perceptual weighting normalization
+                            let avg_weight = engine.avg_weight_q8;  // For weighted SAD display only
                             let perceptual_k = engine.perceptual_k_q8();  // k value if weighted, None otherwise
 
                             let mut update_callback = |_genome: &crate::dna::Genome, rgba: &[u8], fitness_val: f64, _improved: bool| {
-                                let fitness_percent = crate::engine::Engine::fitness_percent_from_worst(
+                                let fitness_percent = crate::engine::Engine::fitness_percent_from_baseline(
+                                    baseline,
                                     fitness_val,
-                                    img_width,
-                                    img_height,
-                                    avg_weight,
                                 );
 
                                 // Compute metrics snapshot from fitness_val

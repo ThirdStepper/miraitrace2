@@ -1197,24 +1197,12 @@ impl Engine {
     }
 
     /// Get current fitness as a percentage (0-100, higher is better)
-    /// Normalized by the *actual* starting error (blank canvas vs target).
+    /// Normalized by baseline fitness (actual starting error using current metric).
+    /// This stays honest regardless of k value or alpha scaling changes.
     pub fn fitness_percent_normalized(&self) -> f32 {
         profiling::scope!("fitness_percent_normalized");
-
-        // Compute worst-case fitness: all pixels maximally different (RGB L1 distance)
-        let pixels = (self.width as u64) * (self.height as u64);
-        let worst_unweighted = pixels * 3 * 255;  // Max RGB diff per pixel
-
-        // Scale by average weight if perceptual weighting is enabled
-        let worst_case = if let Some(avg_w) = self.avg_weight_q8 {
-            // avg_w is Q8.8, so divide by 256 to get actual multiplier
-            ((worst_unweighted * avg_w as u64) >> 8) as f64
-        } else {
-            worst_unweighted as f64
-        };
-
-        // Percent quality: 0% = worst possible, 100% = perfect match
-        let pct = (1.0 - (self.current_fitness / worst_case.max(1.0))) * 100.0;
+        let denom = self.baseline_fitness.max(std::f64::EPSILON);
+        let pct = (1.0 - (self.current_fitness / denom)) * 100.0;
         pct.clamp(0.0, 100.0) as f32
     }
 
@@ -1225,27 +1213,12 @@ impl Engine {
     }
 
     /// Reuse the same normalization without needing &self.
-    /// Pass current error, image dimensions, and optional average weight.
+    /// Pass baseline and current error (must be in same metric).
     #[inline]
-    pub fn fitness_percent_from_worst(
-        current: f64,
-        width: u32,
-        height: u32,
-        avg_weight_q8: Option<u16>,
-    ) -> f32 {
+    pub fn fitness_percent_from_baseline(baseline: f64, current: f64) -> f32 {
         profiling::scope!("fitness_percent_normalized");
-
-        // Compute worst-case fitness
-        let pixels = (width as u64) * (height as u64);
-        let worst_unweighted = pixels * 3 * 255;
-
-        let worst_case = if let Some(avg_w) = avg_weight_q8 {
-            ((worst_unweighted * avg_w as u64) >> 8) as f64
-        } else {
-            worst_unweighted as f64
-        };
-
-        let pct = (1.0 - (current / worst_case.max(1.0))) * 100.0;
+        let denom = if baseline > 0.0 { baseline } else { std::f64::EPSILON };
+        let pct = (1.0 - (current / denom)) * 100.0;
         pct.clamp(0.0, 100.0) as f32
     }
 
@@ -1262,6 +1235,68 @@ impl Engine {
             sad_per_px: sad_px,
             psnr,
         };
+    }
+
+    /// Apply new perceptual weighting settings and rebase fitness to new metric.
+    /// This rebuilds weights, recomputes current fitness, and resets baseline so that
+    /// fitness percentage stays honest under the new definition.
+    ///
+    /// Call this when user changes k_q8 or scale_by_alpha settings.
+    pub fn apply_perceptual_settings(&mut self, k_q8: u16, scale_by_alpha: bool) {
+        profiling::scope!("apply_perceptual_settings");
+
+        // Update config
+        self.cfg.perceptual_k_q8 = k_q8;
+        self.cfg.perceptual_scale_by_alpha = scale_by_alpha;
+
+        // Rebuild weights (or clear if k=0)
+        let (new_weights, new_weights_pyr, new_avg_weight) = if k_q8 > 0 {
+            let weights_full = crate::fitness::precompute_luma_weights_q8(
+                &self.target_unpremul,
+                k_q8,
+                scale_by_alpha,
+            );
+
+            // Compute average weight for display
+            let sum_weights: u64 = weights_full.iter().map(|&w| w as u64).sum();
+            let avg_w = (sum_weights / weights_full.len() as u64) as u16;
+
+            // Build weight pyramid
+            let weights_pyr = {
+                let mut pyr = Vec::with_capacity(3);
+                pyr.push(weights_full.clone());
+                let w1 = crate::fitness::downsample_weights_q8_box2(&pyr[0], self.width, self.height);
+                let w0 = crate::fitness::downsample_weights_q8_box2(&w1, self.width / 2, self.height / 2);
+                vec![w0, w1, pyr[0].clone()]
+            };
+
+            (Some(weights_full), Some(weights_pyr), Some(avg_w))
+        } else {
+            (None, None, None)
+        };
+
+        self.luma_weights_q8 = new_weights;
+        self.luma_weights_pyr_q8 = new_weights_pyr;
+        self.avg_weight_q8 = new_avg_weight;
+
+        // Recompute fitness with new metric
+        self.current_fitness = if let Some(ref weights) = self.luma_weights_q8 {
+            crate::fitness::sad_rgb_weighted_q8(&self.target_rgba, &self.current_rgba, weights)
+        } else {
+            sad_rgb_parallel(&self.target_rgba, &self.current_rgba, None)
+        };
+
+        // Reset baseline to current fitness (under new metric)
+        // This keeps fitness_percent continuous and honest
+        self.baseline_fitness = self.current_fitness;
+
+        // Update metrics snapshot
+        self.update_metrics_snapshot();
+
+        // Recompute tile grid if present
+        if let Some(ref mut tg) = self.tile_grid {
+            tg.recompute_all(self.width, self.height, &self.target_rgba, &self.current_rgba);
+        }
     }
 
     /// Generate a random mutation and return a candidate genome with fitness + render
