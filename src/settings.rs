@@ -169,6 +169,16 @@ pub struct AppSettings {
     /// Manual tile size override (only used when tile_auto = false, range 16-128)
     pub tile_size: u32,
 
+    // Perceptual Weighting
+    /// Enable luminance-based weighting to emphasize bright-region errors (0 = off)
+    pub perceptual_enabled: bool,
+    /// Perceptual weighting strength in Q8.8 fixed-point (0=off, 48=balanced, 32-96 typical range)
+    pub perceptual_k_q8: u16,
+    /// If true, multiply weight by (alpha/255). Default: false (premul RGB already encodes coverage)
+    pub perceptual_scale_by_alpha: bool,
+    /// Show weight map overlay (debug visualization - grayscale overlay showing per-pixel weights)
+    pub perceptual_show_weight_map: bool,
+
     // Metrics & Termination
     /// Resolution-invariant metrics configuration (PSNR, SAD/px)
     pub metrics_settings: MetricsSettings,
@@ -231,6 +241,12 @@ impl Default for AppSettings {
             use_tiled_fitness: true,    // Enabled by default (minimal overhead, significant speedup)
             tile_auto: true,            // Auto tile size (recommended)
             tile_size: 64,              // Fallback when manual (typical default)
+
+            // Perceptual weighting (disabled by default - user opt-in)
+            perceptual_enabled: false,  // Off by default (user must enable)
+            perceptual_k_q8: 48,        // Balanced default when enabled (≈0.1875 = 19% extra at white)
+            perceptual_scale_by_alpha: false,  // Don't scale by alpha (premul already encodes coverage)
+            perceptual_show_weight_map: false,  // Debug overlay off by default
 
             // Metrics & Termination
             metrics_settings: MetricsSettings::default(),
@@ -297,6 +313,8 @@ impl AppSettings {
             enforce_simple_convex: self.enforce_simple_convex,
             use_pyramid_fitness: self.use_pyramid_fitness,
             use_tiled_fitness: self.use_tiled_fitness,
+            perceptual_k_q8: if self.perceptual_enabled { self.perceptual_k_q8 } else { 0 },
+            perceptual_scale_by_alpha: self.perceptual_scale_by_alpha,
         }
     }
 }
