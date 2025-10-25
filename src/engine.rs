@@ -101,7 +101,8 @@ impl Engine {
 
         // Initialize tiled fitness cache if enabled
         let tile_grid = if cfg.use_tiled_fitness {
-            // Auto tile size heuristic based on image area
+            // Automatic tile size heuristic based on image area
+            // Tile size is always computed automatically (no manual override)
             let area = (width as u64) * (height as u64);
             let tile_size = if area <= 500_000 {
                 32  // ≤0.5MP: small tiles for fine granularity

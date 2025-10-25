@@ -945,32 +945,7 @@ impl MiraiApp {
                             ui.label("  • Significant speedup for optimization (10-50%)");
                             ui.label("  • Tile-wise early exit for faster rejection");
                             ui.label("  • Negligible quality impact");
-                            ui.add_space(5.0);
-
-                            // tile auto sizing
-                            ui.horizontal(|ui| {
-                                ui.label("Auto Tile Size:");
-                                ui.checkbox(&mut self.settings.tile_auto, "");
-                            });
-                            ui.label("  Automatically compute tile size based on image dimensions");
-                            ui.label("  • ≤0.5MP: 32px tiles (fine granularity)");
-                            ui.label("  • ≤8MP: 64px tiles (balanced, typical 1080p-4K)");
-                            ui.label("  • >8MP: 128px tiles (reduced overhead)");
-                            ui.add_space(5.0);
-
-                            // manual tile size
-                            ui.add_enabled_ui(!self.settings.tile_auto, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label("Manual Tile Size:");
-                                    ui.add(egui::Slider::new(&mut self.settings.tile_size, 16..=128)
-                                        .step_by(16.0)
-                                        .text("pixels"));
-                                });
-                                ui.label("  Only used when Auto Tile Size is disabled");
-                                ui.label("  • 32px: fine granularity, higher overhead");
-                                ui.label("  • 64px: balanced (recommended)");
-                                ui.label("  • 128px: coarse, lower overhead");
-                            });
+                            ui.label("  • Tile size: automatic (32/64/128px based on image area)");
                         });
 
                     ui.add_space(10.0);

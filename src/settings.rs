@@ -164,10 +164,6 @@ pub struct AppSettings {
     pub use_pyramid_fitness: bool,
     /// Use tiled fitness cache for incremental evaluation (recommended, minimal quality impact)
     pub use_tiled_fitness: bool,
-    /// Auto-compute tile size based on image dimensions (recommended)
-    pub tile_auto: bool,
-    /// Manual tile size override (only used when tile_auto = false, range 16-128)
-    pub tile_size: u32,
 
     // Perceptual Weighting
     /// Enable luminance-based weighting to emphasize bright-region errors (0 = off)
@@ -239,8 +235,6 @@ impl Default for AppSettings {
             // Fast fitness evaluation
             use_pyramid_fitness: true,  // Enabled by default (proven safe)
             use_tiled_fitness: true,    // Enabled by default (minimal overhead, significant speedup)
-            tile_auto: true,            // Auto tile size (recommended)
-            tile_size: 64,              // Fallback when manual (typical default)
 
             // Perceptual weighting (disabled by default - user opt-in)
             perceptual_enabled: false,  // Off by default (user must enable)
