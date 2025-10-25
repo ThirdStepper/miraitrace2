@@ -859,21 +859,6 @@ impl TileGrid {
 pub const FITNESS_CHANNELS: u32 = 3;
 pub const FITNESS_CHANNELS_F64: f64 = 3.0;
 
-/// Resolution-invariant SAD: normalizes absolute error by total pixel count.
-/// Use this instead of raw SAD to compare images of different sizes.
-#[inline]
-pub fn sad_per_pixel(sad: f64, w: u32, h: u32) -> f64 {
-    sad / ((w as f64) * (h as f64))
-}
-
-/// Pseudo-MSE derived from SAD (not true MSE).
-/// NOTE: True MSE requires SSE (sum of squared errors). This is a placeholder
-/// for API symmetry. Once SSE is available, replace with: SSE / (w * h * channels).
-#[inline]
-pub fn pseudo_mse_from_sad(sad: f64, w: u32, h: u32) -> f64 {
-    sad_per_pixel(sad, w, h) / (FITNESS_CHANNELS_F64).max(1.0)
-}
-
 /// PSNR (Peak Signal-to-Noise Ratio) in decibels.
 /// - `mse`: Mean Squared Error (or pseudo-MSE from SAD)
 /// - `peak`: 255.0 for 8-bit images, 1.0 for normalized [0,1] range
