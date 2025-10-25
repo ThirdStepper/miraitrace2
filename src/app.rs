@@ -72,18 +72,7 @@ enum EngineCommand {
     Pause,
     Stop,
     SetFocusRegion(Option<FocusRegion>),
-    UpdateAutofocusSettings(
-        bool,                              // enabled
-        crate::settings::AutofocusMode,    // mode (NEW)
-        u32,                               // grid_size (now 2-16 for UniformGrid)
-        u32,                               // max_depth (NEW - for Quadtree)
-        f64,                               // error_threshold (NEW - for Quadtree)
-        u64,                               // interval
-        u32,                               // multi_count
-        bool,                              // probabilistic
-        bool,                              // progressive
-        u32,                               // gui_update_rate
-    ),
+    UpdateAutofocusSettings(crate::settings::AutofocusPack),
     TriggerAutofocus, // force immediate autofocus update
 }
 
@@ -217,11 +206,12 @@ impl MiraiApp {
                 let height = h as u32;
                 let ctx_clone = ctx.clone();
                 let mutate_config = self.settings.to_mutate_config();
+                let engine_init = crate::settings::EngineInit::from(&self.settings);
 
                 // spawn background engine thread
                 let handle = thread::Builder::new()
                     .name("engine".to_owned()).spawn(move || {
-                    let mut engine = Engine::new(target_rgba.clone(), width, height, mutate_config);
+                    let mut engine = Engine::new(target_rgba.clone(), width, height, mutate_config, engine_init);
                     let mut running = false;
 
                     // send initial state (wrap in Arc to avoid copy)
@@ -251,21 +241,21 @@ impl MiraiApp {
                                 EngineCommand::SetFocusRegion(region) => {
                                     engine.focus_region = region;
                                 }
-                                EngineCommand::UpdateAutofocusSettings(enabled, mode, grid_size, max_depth, error_threshold, interval, multi_count, probabilistic, progressive, gui_update_rate) => {
-                                    engine.autofocus_enabled = enabled;
-                                    engine.autofocus_mode = mode;
-                                    engine.autofocus_max_depth = max_depth;
-                                    engine.autofocus_error_threshold = error_threshold;
+                                EngineCommand::UpdateAutofocusSettings(pack) => {
+                                    engine.autofocus_enabled = pack.enabled;
+                                    engine.autofocus_mode = pack.mode;
+                                    engine.autofocus_max_depth = pack.max_depth;
+                                    engine.autofocus_error_threshold = pack.error_threshold;
                                     // only update grid_size if progressive refinement is disabled
                                     // (progressive mode controls grid_size dynamically)
-                                    if !progressive {
-                                        engine.autofocus_grid_size = grid_size;
+                                    if !pack.progressive {
+                                        engine.autofocus_grid_size = pack.grid_size;
                                     }
-                                    engine.autofocus_interval = interval;
-                                    engine.autofocus_multi_tile_count = multi_count;
-                                    engine.autofocus_probabilistic = probabilistic;
-                                    engine.autofocus_progressive = progressive;
-                                    engine.gui_update_rate = gui_update_rate;
+                                    engine.autofocus_interval = pack.interval;
+                                    engine.autofocus_multi_tile_count = pack.multi_tile_count;
+                                    engine.autofocus_probabilistic = pack.probabilistic;
+                                    engine.autofocus_progressive = pack.progressive;
+                                    engine.gui_update_rate = pack.gui_update_rate;
                                 }
                                 EngineCommand::TriggerAutofocus => {
                                     engine.update_autofocus();  // force immediate autofocus update
@@ -371,22 +361,6 @@ impl MiraiApp {
                 self.generation = 0;
                 self.fitness = 0.0;
                 self.triangles = 1;
-
-                // send initial autofocus settings to ensure engine starts with correct mode
-                if let Some(tx) = &self.command_tx {
-                    let _ = tx.send(EngineCommand::UpdateAutofocusSettings(
-                        self.settings.autofocus_enabled,
-                        self.settings.autofocus_mode,
-                        self.settings.autofocus_grid_size,
-                        self.settings.autofocus_max_depth,
-                        self.settings.autofocus_error_threshold,
-                        self.settings.autofocus_interval,
-                        self.settings.autofocus_multi_tile_count,
-                        self.settings.autofocus_probabilistic,
-                        self.settings.autofocus_progressive,
-                        self.settings.gui_update_rate,
-                    ));
-                }
             }
         }
     }
@@ -669,18 +643,8 @@ impl MiraiApp {
 
                         // apply autofocus settings to running engine immediately
                         if let Some(tx) = &self.command_tx {
-                            let _ = tx.send(EngineCommand::UpdateAutofocusSettings(
-                                self.settings.autofocus_enabled,
-                                self.settings.autofocus_mode,
-                                self.settings.autofocus_grid_size,
-                                self.settings.autofocus_max_depth,
-                                self.settings.autofocus_error_threshold,
-                                self.settings.autofocus_interval,
-                                self.settings.autofocus_multi_tile_count,
-                                self.settings.autofocus_probabilistic,
-                                self.settings.autofocus_progressive,
-                                self.settings.gui_update_rate,
-                            ));
+                            let pack = crate::settings::AutofocusPack::from(&self.settings);
+                            let _ = tx.send(EngineCommand::UpdateAutofocusSettings(pack));
                         }
 
                         // NOTE: other settings (mutation probabilities, triangle limits, etc)
@@ -1361,18 +1325,8 @@ impl eframe::App for MiraiApp {
             if i.key_pressed(egui::Key::F) && has_engine {
                 self.settings.autofocus_enabled = !self.settings.autofocus_enabled;
                 if let Some(tx) = &self.command_tx {
-                    let _ = tx.send(EngineCommand::UpdateAutofocusSettings(
-                        self.settings.autofocus_enabled,
-                        self.settings.autofocus_mode,
-                        self.settings.autofocus_grid_size,
-                        self.settings.autofocus_max_depth,
-                        self.settings.autofocus_error_threshold,
-                        self.settings.autofocus_interval,
-                        self.settings.autofocus_multi_tile_count,
-                        self.settings.autofocus_probabilistic,
-                        self.settings.autofocus_progressive,
-                        self.settings.gui_update_rate,
-                    ));
+                    let pack = crate::settings::AutofocusPack::from(&self.settings);
+                    let _ = tx.send(EngineCommand::UpdateAutofocusSettings(pack));
                 }
             }
 
@@ -1444,18 +1398,8 @@ impl eframe::App for MiraiApp {
                         self.settings.autofocus_enabled = !self.settings.autofocus_enabled;
                         // Apply immediately to running engine
                         if let Some(tx) = &self.command_tx {
-                            let _ = tx.send(EngineCommand::UpdateAutofocusSettings(
-                                self.settings.autofocus_enabled,
-                                self.settings.autofocus_mode,
-                                self.settings.autofocus_grid_size,
-                                self.settings.autofocus_max_depth,
-                                self.settings.autofocus_error_threshold,
-                                self.settings.autofocus_interval,
-                                self.settings.autofocus_multi_tile_count,
-                                self.settings.autofocus_probabilistic,
-                                self.settings.autofocus_progressive,
-                                self.settings.gui_update_rate,
-                            ));
+                            let pack = crate::settings::AutofocusPack::from(&self.settings);
+                            let _ = tx.send(EngineCommand::UpdateAutofocusSettings(pack));
                         }
                     }
 

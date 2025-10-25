@@ -265,6 +265,82 @@ impl AppSettings {
     }
 }
 
+/// Engine initialization data derived from AppSettings.
+/// This bundles all settings needed at Engine construction time,
+/// ensuring the engine starts with correct defaults (no post-boot sync needed).
+#[derive(Clone, Debug)]
+pub struct EngineInit {
+    // Autofocus settings
+    pub autofocus_enabled: bool,
+    pub autofocus_mode: AutofocusMode,
+    pub autofocus_grid_size: u32,
+    pub autofocus_max_depth: u32,
+    pub autofocus_error_threshold: f64,
+    pub autofocus_interval: u64,
+    pub autofocus_multi_tile_count: u32,
+    pub autofocus_probabilistic: bool,
+    pub autofocus_progressive: bool,
+
+    // GUI settings needed by engine
+    pub gui_update_rate: u32,
+
+    // Metrics and termination
+    pub metrics_settings: MetricsSettings,
+    pub termination_settings: TerminationSettings,
+}
+
+impl From<&AppSettings> for EngineInit {
+    fn from(settings: &AppSettings) -> Self {
+        Self {
+            autofocus_enabled: settings.autofocus_enabled,
+            autofocus_mode: settings.autofocus_mode,
+            autofocus_grid_size: settings.autofocus_grid_size,
+            autofocus_max_depth: settings.autofocus_max_depth,
+            autofocus_error_threshold: settings.autofocus_error_threshold,
+            autofocus_interval: settings.autofocus_interval,
+            autofocus_multi_tile_count: settings.autofocus_multi_tile_count,
+            autofocus_probabilistic: settings.autofocus_probabilistic,
+            autofocus_progressive: settings.autofocus_progressive,
+            gui_update_rate: settings.gui_update_rate,
+            metrics_settings: settings.metrics_settings,
+            termination_settings: settings.termination_settings,
+        }
+    }
+}
+
+/// Compact runtime pack for updating autofocus settings in the engine thread.
+/// This ensures runtime updates use the same "single source of truth" pattern as EngineInit.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct AutofocusPack {
+    pub enabled: bool,
+    pub mode: AutofocusMode,
+    pub grid_size: u32,
+    pub max_depth: u32,
+    pub error_threshold: f64,
+    pub interval: u64,
+    pub multi_tile_count: u32,
+    pub probabilistic: bool,
+    pub progressive: bool,
+    pub gui_update_rate: u32,
+}
+
+impl From<&AppSettings> for AutofocusPack {
+    fn from(settings: &AppSettings) -> Self {
+        Self {
+            enabled: settings.autofocus_enabled,
+            mode: settings.autofocus_mode,
+            grid_size: settings.autofocus_grid_size,
+            max_depth: settings.autofocus_max_depth,
+            error_threshold: settings.autofocus_error_threshold,
+            interval: settings.autofocus_interval,
+            multi_tile_count: settings.autofocus_multi_tile_count,
+            probabilistic: settings.autofocus_probabilistic,
+            progressive: settings.autofocus_progressive,
+            gui_update_rate: settings.gui_update_rate,
+        }
+    }
+}
+
 impl AppSettings {
     /// Save settings to JSON file
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {

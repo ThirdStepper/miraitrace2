@@ -52,7 +52,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(target_rgba: Vec<u8>, width: u32, height: u32, cfg: MutateConfig) -> Self {
+    pub fn new(target_rgba: Vec<u8>, width: u32, height: u32, cfg: MutateConfig, init: crate::settings::EngineInit) -> Self {
         profiling::scope!("Engine::new");
         let rng = Pcg32::seed_from_u64(0xDEADBEEF);
         let genome = Genome::new_blank(width, height);
@@ -165,23 +165,23 @@ impl Engine {
             generation: 0,
             num_poly_points: initial_poly_points, // Start with max vertices from arity mode
             focus_region: None, // Start with full image focus
-            // Autofocus defaults (matching Evolve's proven settings)
-            autofocus_enabled: true,        // Enabled by default for automatic performance boost
-            autofocus_mode: crate::settings::AutofocusMode::BSPTree,  // Adaptive binary space partitioning (default)
-            autofocus_grid_size: 4,         // 4×4 = 16 tiles (Evolve default)
-            autofocus_max_depth: 4,         // For quadtree (up to 256 tiles)
-            autofocus_error_threshold: 0.0, // Auto-compute threshold
-            autofocus_interval: 100,        // Re-evaluate every 100 generations
+            // Autofocus settings from EngineInit (no hardcoded defaults!)
+            autofocus_enabled: init.autofocus_enabled,
+            autofocus_mode: init.autofocus_mode,
+            autofocus_grid_size: init.autofocus_grid_size,
+            autofocus_max_depth: init.autofocus_max_depth,
+            autofocus_error_threshold: init.autofocus_error_threshold,
+            autofocus_interval: init.autofocus_interval,
             autofocus_last_tiles: None,     // No tile data initially
             autofocus_selected_indices: None,  // No selected indices initially
-            // Advanced autofocus defaults (Phase 3)
-            autofocus_multi_tile_count: 1,  // Single tile (classic)
-            autofocus_probabilistic: false, // Deterministic worst-first
-            autofocus_progressive: true,    // Dynamic progressive refinement (default)
-            gui_update_rate: 4,             // Update progressive params every 4 generations
-            // Resolution-Invariant Metrics
-            metrics_settings: crate::settings::MetricsSettings::default(),
-            termination_settings: crate::settings::TerminationSettings::default(),
+            // Advanced autofocus settings from EngineInit
+            autofocus_multi_tile_count: init.autofocus_multi_tile_count,
+            autofocus_probabilistic: init.autofocus_probabilistic,
+            autofocus_progressive: init.autofocus_progressive,
+            gui_update_rate: init.gui_update_rate,
+            // Resolution-Invariant Metrics from EngineInit
+            metrics_settings: init.metrics_settings,
+            termination_settings: init.termination_settings,
             last_metrics: crate::fitness::MetricsSnapshot::default(),
         };
 
