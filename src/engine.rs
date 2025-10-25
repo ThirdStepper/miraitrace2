@@ -11,6 +11,35 @@ use crate::analysis::find_dominant_color;
 use crate::app::FocusRegion;
 use crate::geom::DirtyRect;
 
+/// Throttles UI updates during optimization to reduce overhead
+/// Counts improvements and triggers callbacks every N improvements
+struct ImprovementThrottle {
+    counter: u32,
+    interval: u32,
+}
+
+impl ImprovementThrottle {
+    fn new(interval: u32) -> Self {
+        Self {
+            counter: 0,
+            interval,
+        }
+    }
+
+    /// Check if we should trigger a UI update, incrementing the counter
+    #[inline]
+    fn should_update(&mut self) -> bool {
+        self.counter += 1;
+        self.counter % self.interval == 0
+    }
+
+    /// Reset the counter (useful when starting a new optimization run)
+    #[inline]
+    fn reset(&mut self) {
+        self.counter = 0;
+    }
+}
+
 pub struct Engine {
     rng: Pcg32,
     cfg: MutateConfig,
@@ -45,6 +74,8 @@ pub struct Engine {
     pub autofocus_probabilistic: bool,      // Probabilistic vs. deterministic worst-first
     pub autofocus_progressive: bool,        // Progressive grid refinement
     pub gui_update_rate: u32,               // How often to update progressive params (default: 4)
+    // UI update throttling
+    improvement_throttle: ImprovementThrottle,  // Centralized throttling for optimization callbacks
     // Resolution-Invariant Metrics
     pub metrics_settings: crate::settings::MetricsSettings,     // PSNR, SAD/px config
     pub termination_settings: crate::settings::TerminationSettings, // Stop conditions
@@ -179,6 +210,8 @@ impl Engine {
             autofocus_probabilistic: init.autofocus_probabilistic,
             autofocus_progressive: init.autofocus_progressive,
             gui_update_rate: init.gui_update_rate,
+            // UI update throttling
+            improvement_throttle: ImprovementThrottle::new(init.gui_update_rate),
             // Resolution-Invariant Metrics from EngineInit
             metrics_settings: init.metrics_settings,
             termination_settings: init.termination_settings,
@@ -489,11 +522,11 @@ impl Engine {
 
     /// Optimize colors of a specific polygon using parallel steepest descent with pyramid acceleration.
     /// Returns (optimized_genome, final_rgba_premul, final_fitness, dirty_rect).
-    /// This is a PURE function - it does not modify Engine state.
+    /// This function modifies only the improvement throttle counter (for UI updates).
     /// Tiles are NOT used inside the optimizer (only at Engine level for full-image fitness).
     /// The dirty_rect tracks the union of all accepted mutations for incremental tile updates.
     fn optimize_colors_fast<F>(
-        &self,
+        &mut self,
         genome: &Genome,
         tri_idx: usize,
         update_callback: &mut F,
@@ -590,11 +623,8 @@ impl Engine {
                     let r = DirtyRect::new(*x_min, *y_min, *x_max, *y_max);
                     dirty = Some(if let Some(d) = dirty { d.union(r) } else { r });
 
-                    // Throttled GUI update
-                    use std::sync::atomic::{AtomicU32, Ordering};
-                    static IMPROVEMENT_COUNTER: AtomicU32 = AtomicU32::new(0);
-                    let count = IMPROVEMENT_COUNTER.fetch_add(1, Ordering::AcqRel);
-                    if count % self.gui_update_rate == 0 {
+                    // Throttled GUI update (centralized throttle)
+                    if self.improvement_throttle.should_update() {
                         update_callback(&best, &current_render_premul, current_fitness, true);
                     }
 
@@ -610,11 +640,11 @@ impl Engine {
 
     /// Optimize shape of a specific polygon using parallel steepest descent with pyramid acceleration.
     /// Returns (optimized_genome, final_rgba_premul, final_fitness, dirty_rect).
-    /// This is a PURE function - it does not modify Engine state.
+    /// This function modifies only the improvement throttle counter (for UI updates).
     /// Tiles are NOT used inside the optimizer (only at Engine level for full-image fitness).
     /// The dirty_rect tracks the union of all accepted mutations for incremental tile updates.
     fn optimize_shape_fast<F>(
-        &self,
+        &mut self,
         genome: &Genome,
         tri_idx: usize,
         update_callback: &mut F,
@@ -721,11 +751,8 @@ impl Engine {
                     let r = DirtyRect::new(*x_min, *y_min, *x_max, *y_max);
                     dirty = Some(if let Some(d) = dirty { d.union(r) } else { r });
 
-                    // Throttled GUI update
-                    use std::sync::atomic::{AtomicU32, Ordering};
-                    static IMPROVEMENT_COUNTER: AtomicU32 = AtomicU32::new(0);
-                    let count = IMPROVEMENT_COUNTER.fetch_add(1, Ordering::AcqRel);
-                    if count % self.gui_update_rate == 0 {
+                    // Throttled GUI update (centralized throttle)
+                    if self.improvement_throttle.should_update() {
                         update_callback(&best, &current_render_premul, current_fitness, true);
                     }
 
@@ -858,7 +885,8 @@ impl Engine {
             // Optimize the new polygon (matching Evolve's tryAddPoly lines 21-22)
             // The update_callback will be called during optimization to send UI updates
             // The optimization functions are stateless - we commit with incremental tile updates
-            let (genome, rgba, fitness, dirty) = self.optimize_colors_fast(&self.genome, poly_idx, update_callback);
+            let genome_ref = &self.genome.clone();
+            let (genome, rgba, fitness, dirty) = self.optimize_colors_fast(genome_ref, poly_idx, update_callback);
             self.genome = genome;
             if let Some(rect) = dirty {
                 self.update_current_in_rect(rgba, fitness, rect);  // Only update affected tiles
@@ -866,7 +894,8 @@ impl Engine {
                 self.update_current(rgba, fitness);  // Fallback (rare)
             }
 
-            let (genome, rgba, fitness, dirty) = self.optimize_shape_fast(&self.genome, poly_idx, update_callback);
+            let genome_ref = &self.genome.clone();
+            let (genome, rgba, fitness, dirty) = self.optimize_shape_fast(genome_ref, poly_idx, update_callback);
             self.genome = genome;
             if let Some(rect) = dirty {
                 self.update_current_in_rect(rgba, fitness, rect);  // Only update affected tiles
