@@ -72,18 +72,7 @@ enum EngineCommand {
     Pause,
     Stop,
     SetFocusRegion(Option<FocusRegion>),
-    UpdateAutofocusSettings(
-        bool,                              // enabled
-        crate::settings::AutofocusMode,    // mode (NEW)
-        u32,                               // grid_size (now 2-16 for UniformGrid)
-        u32,                               // max_depth (NEW - for Quadtree)
-        f64,                               // error_threshold (NEW - for Quadtree)
-        u64,                               // interval
-        u32,                               // multi_count
-        bool,                              // probabilistic
-        bool,                              // progressive
-        u32,                               // gui_update_rate
-    ),
+    UpdateAutofocusSettings(crate::settings::AutofocusPack),
     TriggerAutofocus, // force immediate autofocus update
 }
 
@@ -152,7 +141,6 @@ impl MiraiApp {
         let settings = crate::settings::AppSettings::load();
 
         // apply settings to global state
-        crate::mutate::set_gui_update_rate(settings.gui_update_rate);
         crate::render::set_polygon_antialiasing(settings.polygon_antialiasing);
 
         Self {
@@ -217,11 +205,12 @@ impl MiraiApp {
                 let height = h as u32;
                 let ctx_clone = ctx.clone();
                 let mutate_config = self.settings.to_mutate_config();
+                let engine_init = crate::settings::EngineInit::from(&self.settings);
 
                 // spawn background engine thread
                 let handle = thread::Builder::new()
                     .name("engine".to_owned()).spawn(move || {
-                    let mut engine = Engine::new(target_rgba.clone(), width, height, mutate_config);
+                    let mut engine = Engine::new(target_rgba.clone(), width, height, mutate_config, engine_init);
                     let mut running = false;
 
                     // send initial state (wrap in Arc to avoid copy)
@@ -251,21 +240,21 @@ impl MiraiApp {
                                 EngineCommand::SetFocusRegion(region) => {
                                     engine.focus_region = region;
                                 }
-                                EngineCommand::UpdateAutofocusSettings(enabled, mode, grid_size, max_depth, error_threshold, interval, multi_count, probabilistic, progressive, gui_update_rate) => {
-                                    engine.autofocus_enabled = enabled;
-                                    engine.autofocus_mode = mode;
-                                    engine.autofocus_max_depth = max_depth;
-                                    engine.autofocus_error_threshold = error_threshold;
+                                EngineCommand::UpdateAutofocusSettings(pack) => {
+                                    engine.autofocus_enabled = pack.enabled;
+                                    engine.autofocus_mode = pack.mode;
+                                    engine.autofocus_max_depth = pack.max_depth;
+                                    engine.autofocus_error_threshold = pack.error_threshold;
                                     // only update grid_size if progressive refinement is disabled
                                     // (progressive mode controls grid_size dynamically)
-                                    if !progressive {
-                                        engine.autofocus_grid_size = grid_size;
+                                    if !pack.progressive {
+                                        engine.autofocus_grid_size = pack.grid_size;
                                     }
-                                    engine.autofocus_interval = interval;
-                                    engine.autofocus_multi_tile_count = multi_count;
-                                    engine.autofocus_probabilistic = probabilistic;
-                                    engine.autofocus_progressive = progressive;
-                                    engine.gui_update_rate = gui_update_rate;
+                                    engine.autofocus_interval = pack.interval;
+                                    engine.autofocus_multi_tile_count = pack.multi_tile_count;
+                                    engine.autofocus_probabilistic = pack.probabilistic;
+                                    engine.autofocus_progressive = pack.progressive;
+                                    engine.gui_update_rate = pack.gui_update_rate;
                                 }
                                 EngineCommand::TriggerAutofocus => {
                                     engine.update_autofocus();  // force immediate autofocus update
@@ -371,22 +360,6 @@ impl MiraiApp {
                 self.generation = 0;
                 self.fitness = 0.0;
                 self.triangles = 1;
-
-                // send initial autofocus settings to ensure engine starts with correct mode
-                if let Some(tx) = &self.command_tx {
-                    let _ = tx.send(EngineCommand::UpdateAutofocusSettings(
-                        self.settings.autofocus_enabled,
-                        self.settings.autofocus_mode,
-                        self.settings.autofocus_grid_size,
-                        self.settings.autofocus_max_depth,
-                        self.settings.autofocus_error_threshold,
-                        self.settings.autofocus_interval,
-                        self.settings.autofocus_multi_tile_count,
-                        self.settings.autofocus_probabilistic,
-                        self.settings.autofocus_progressive,
-                        self.settings.gui_update_rate,
-                    ));
-                }
             }
         }
     }
@@ -660,8 +633,7 @@ impl MiraiApp {
                 // Apply, Save, and Reset buttons at the top
                 ui.horizontal(|ui| {
                     if ui.button("Apply Settings").on_hover_text("Apply changes to current session").clicked() {
-                        // Apply settings to global state immediately (GUI rate & AA only)
-                        crate::mutate::set_gui_update_rate(self.settings.gui_update_rate);
+                        // Apply settings to global state immediately (AA only)
                         crate::render::set_polygon_antialiasing(self.settings.polygon_antialiasing);
 
                         // update UI upload gate to sync with new gui_update_rate (counter_interval = rate × 25)
@@ -669,18 +641,8 @@ impl MiraiApp {
 
                         // apply autofocus settings to running engine immediately
                         if let Some(tx) = &self.command_tx {
-                            let _ = tx.send(EngineCommand::UpdateAutofocusSettings(
-                                self.settings.autofocus_enabled,
-                                self.settings.autofocus_mode,
-                                self.settings.autofocus_grid_size,
-                                self.settings.autofocus_max_depth,
-                                self.settings.autofocus_error_threshold,
-                                self.settings.autofocus_interval,
-                                self.settings.autofocus_multi_tile_count,
-                                self.settings.autofocus_probabilistic,
-                                self.settings.autofocus_progressive,
-                                self.settings.gui_update_rate,
-                            ));
+                            let pack = crate::settings::AutofocusPack::from(&self.settings);
+                            let _ = tx.send(EngineCommand::UpdateAutofocusSettings(pack));
                         }
 
                         // NOTE: other settings (mutation probabilities, triangle limits, etc)
@@ -695,7 +657,6 @@ impl MiraiApp {
 
                     if ui.button("Reset to Defaults").on_hover_text("Restore default settings").clicked() {
                         self.settings = crate::settings::AppSettings::default();
-                        crate::mutate::set_gui_update_rate(self.settings.gui_update_rate);
                         crate::render::set_polygon_antialiasing(self.settings.polygon_antialiasing);
                         self.upload_gate.update_gui_rate(self.settings.gui_update_rate);
                     }
@@ -981,32 +942,7 @@ impl MiraiApp {
                             ui.label("  • Significant speedup for optimization (10-50%)");
                             ui.label("  • Tile-wise early exit for faster rejection");
                             ui.label("  • Negligible quality impact");
-                            ui.add_space(5.0);
-
-                            // tile auto sizing
-                            ui.horizontal(|ui| {
-                                ui.label("Auto Tile Size:");
-                                ui.checkbox(&mut self.settings.tile_auto, "");
-                            });
-                            ui.label("  Automatically compute tile size based on image dimensions");
-                            ui.label("  • ≤0.5MP: 32px tiles (fine granularity)");
-                            ui.label("  • ≤8MP: 64px tiles (balanced, typical 1080p-4K)");
-                            ui.label("  • >8MP: 128px tiles (reduced overhead)");
-                            ui.add_space(5.0);
-
-                            // manual tile size
-                            ui.add_enabled_ui(!self.settings.tile_auto, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label("Manual Tile Size:");
-                                    ui.add(egui::Slider::new(&mut self.settings.tile_size, 16..=128)
-                                        .step_by(16.0)
-                                        .text("pixels"));
-                                });
-                                ui.label("  Only used when Auto Tile Size is disabled");
-                                ui.label("  • 32px: fine granularity, higher overhead");
-                                ui.label("  • 64px: balanced (recommended)");
-                                ui.label("  • 128px: coarse, lower overhead");
-                            });
+                            ui.label("  • Tile size: automatic (32/64/128px based on image area)");
                         });
 
                     ui.add_space(10.0);
@@ -1361,18 +1297,8 @@ impl eframe::App for MiraiApp {
             if i.key_pressed(egui::Key::F) && has_engine {
                 self.settings.autofocus_enabled = !self.settings.autofocus_enabled;
                 if let Some(tx) = &self.command_tx {
-                    let _ = tx.send(EngineCommand::UpdateAutofocusSettings(
-                        self.settings.autofocus_enabled,
-                        self.settings.autofocus_mode,
-                        self.settings.autofocus_grid_size,
-                        self.settings.autofocus_max_depth,
-                        self.settings.autofocus_error_threshold,
-                        self.settings.autofocus_interval,
-                        self.settings.autofocus_multi_tile_count,
-                        self.settings.autofocus_probabilistic,
-                        self.settings.autofocus_progressive,
-                        self.settings.gui_update_rate,
-                    ));
+                    let pack = crate::settings::AutofocusPack::from(&self.settings);
+                    let _ = tx.send(EngineCommand::UpdateAutofocusSettings(pack));
                 }
             }
 
@@ -1444,18 +1370,8 @@ impl eframe::App for MiraiApp {
                         self.settings.autofocus_enabled = !self.settings.autofocus_enabled;
                         // Apply immediately to running engine
                         if let Some(tx) = &self.command_tx {
-                            let _ = tx.send(EngineCommand::UpdateAutofocusSettings(
-                                self.settings.autofocus_enabled,
-                                self.settings.autofocus_mode,
-                                self.settings.autofocus_grid_size,
-                                self.settings.autofocus_max_depth,
-                                self.settings.autofocus_error_threshold,
-                                self.settings.autofocus_interval,
-                                self.settings.autofocus_multi_tile_count,
-                                self.settings.autofocus_probabilistic,
-                                self.settings.autofocus_progressive,
-                                self.settings.gui_update_rate,
-                            ));
+                            let pack = crate::settings::AutofocusPack::from(&self.settings);
+                            let _ = tx.send(EngineCommand::UpdateAutofocusSettings(pack));
                         }
                     }
 

@@ -1,15 +1,3 @@
-use std::sync::atomic::{AtomicU32, Ordering};
-
-
-// counter for throttling GUI updates during optimization
-// updates GUI every Nth improvement to balance visual feedback with performance
-static GUI_UPDATE_RATE: AtomicU32 = AtomicU32::new(4);  // Dynamic: can be changed from settings UI
-
-/// update the GUI update rate (called from settings UI)
-pub fn set_gui_update_rate(rate: u32) {
-    GUI_UPDATE_RATE.store(rate.max(1), Ordering::Release); // Minimum 1
-}
-
 #[derive(Clone)]
 pub struct MutateConfig {
     // nutation probabilities (match original Evolve exactly)
