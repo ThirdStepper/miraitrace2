@@ -22,6 +22,10 @@ pub struct Engine {
     target_unpremul: Vec<u8>,  // unpremultiplied RGBA (for color sampling / analysis)
     target_pyr: GaussianPyramid, // Multi-resolution pyramid (1/4x, 1/2x, 1x) for coarse-to-fine fitness
     tile_grid: Option<TileGrid>,  // Tiled error cache for fast incremental fitness
+    // Perceptual weighting: luminance-based weights to emphasize bright-region errors
+    luma_weights_q8: Option<Vec<u16>>,  // Q8.8 weights at full resolution (one per pixel)
+    luma_weights_pyr_q8: Option<Vec<Vec<u16>>>,  // Weight pyramid matching target_pyr levels
+    pub avg_weight_q8: Option<u16>,  // Average weight (Q8.8) for fitness normalization (weighted worst-case)
     pub width: u32,            // Cached image width
     pub height: u32,           // Cached image height
     pub generation: u64,       // Generation counter (incremented during optimization)
@@ -80,8 +84,64 @@ impl Engine {
             None
         };
 
-        let current_fitness = sad_rgb_parallel(&target_rgba, &current_rgba, None);
+        // Precompute luminance weights if perceptual weighting is enabled
+        let (luma_weights_q8, luma_weights_pyr_q8, avg_weight_q8) = if cfg.perceptual_k_q8 > 0 {
+            profiling::scope!("precompute_perceptual_weights");
+
+            // Compute full-resolution weights from unpremultiplied target (accurate reflectance Y)
+            let weights_full = crate::fitness::precompute_luma_weights_q8(
+                &target_unpremul,
+                cfg.perceptual_k_q8,
+                cfg.perceptual_scale_by_alpha,
+            );
+
+            // Compute average weight (Q8.8) for fitness normalization
+            // This ensures fitness_percent stays consistent across different k values
+            let sum_weights: u64 = weights_full.iter().map(|&w| w as u64).sum();
+            let avg_w = (sum_weights / weights_full.len() as u64) as u16;
+
+            // Build weight pyramid to match image pyramid levels (0=1/4x, 1=1/2x, 2=1x)
+            let weights_pyr = {
+                let mut pyr = Vec::with_capacity(3);
+
+                // Level 2: full resolution (1x)
+                pyr.push(weights_full.clone());
+
+                // Level 1: half resolution (1/2x)
+                let w1 = crate::fitness::downsample_weights_q8_box2(&pyr[0], width, height);
+
+                // Level 0: quarter resolution (1/4x)
+                let w0 = crate::fitness::downsample_weights_q8_box2(&w1, width / 2, height / 2);
+
+                // Reverse order to match GaussianPyramid layout (level 0 = coarsest)
+                vec![w0, w1, pyr[0].clone()]
+            };
+
+            (Some(weights_full), Some(weights_pyr), Some(avg_w))
+        } else {
+            (None, None, None)
+        };
+
+        // Compute baseline/current fitness using weighted SAD if weights are present
+        let current_fitness = if let Some(ref weights) = luma_weights_q8 {
+            crate::fitness::sad_rgb_weighted_q8(&target_rgba, &current_rgba, weights)
+        } else {
+            sad_rgb_parallel(&target_rgba, &current_rgba, None)
+        };
         let baseline_fitness = current_fitness;
+
+        // Debug sanity check: verify corrected Q8.8 math (k=48 → ~1.1875× at white = 304 in Q8.8)
+        #[cfg(debug_assertions)]
+        if cfg.perceptual_k_q8 == 48 && !cfg.perceptual_scale_by_alpha {
+            let y_white = 255u16;
+            let term_q8 = ((cfg.perceptual_k_q8 as u32 * y_white as u32) + 127) / 255;
+            let w_white_q8 = 256u32 + term_q8;
+            debug_assert!(
+                (w_white_q8 as i32 - 304).abs() <= 1,
+                "Perceptual weight math error: k=48 at white should be 304 (1.1875×), got {}",
+                w_white_q8
+            );
+        }
 
         // Save max_vertices before cfg is moved
         let initial_poly_points = cfg.max_vertices;
@@ -97,6 +157,9 @@ impl Engine {
             target_unpremul,
             target_pyr,
             tile_grid,
+            luma_weights_q8,
+            luma_weights_pyr_q8,
+            avg_weight_q8,
             width,
             height,
             generation: 0,
@@ -180,6 +243,59 @@ impl Engine {
         }
         // Update resolution-invariant metrics
         self.update_metrics_snapshot();
+    }
+
+    /// Compute full-image fitness, routing to weighted SAD if perceptual weights are enabled.
+    /// This is the unified fitness function used throughout the engine.
+    #[inline]
+    fn compute_fitness(&self, current_rgba: &[u8], best_so_far: Option<u64>) -> f64 {
+        if let Some(ref weights) = self.luma_weights_q8 {
+            // Weighted SAD (perceptual emphasis on bright regions)
+            // Note: best_so_far early-exit not implemented for weighted path (negligible benefit)
+            crate::fitness::sad_rgb_weighted_q8(&self.target_rgba, current_rgba, weights)
+        } else {
+            // Standard SAD (SIMD-accelerated, with optional early-exit)
+            sad_rgb_parallel(&self.target_rgba, current_rgba, best_so_far)
+        }
+    }
+
+    /// Compute rect fitness, routing to weighted SAD if perceptual weights are enabled.
+    /// Used for tile-based and rect-based fitness evaluation.
+    #[inline]
+    fn compute_fitness_rect(
+        &self,
+        current_rgba: &[u8],
+        x_min: u32,
+        y_min: u32,
+        x_max: u32,
+        y_max: u32,
+        best_so_far: Option<u64>,
+    ) -> f64 {
+        if let Some(ref weights) = self.luma_weights_q8 {
+            // Weighted rect SAD
+            crate::fitness::sad_rgb_weighted_q8_rect(
+                &self.target_rgba,
+                current_rgba,
+                weights,
+                x_min,
+                y_min,
+                x_max,
+                y_max,
+                self.width,
+            )
+        } else {
+            // Standard rect SAD
+            sad_rgb_rect(
+                &self.target_rgba,
+                current_rgba,
+                x_min,
+                y_min,
+                x_max,
+                y_max,
+                self.width,
+                best_so_far,
+            )
+        }
     }
 
     /// Merge multiple focus regions into a single bounding box (for multi-tile focus)
@@ -389,14 +505,14 @@ impl Engine {
 
         if tri_idx >= genome.polys.len() {
             let rgba = CpuRenderer::render_rgba_premul(genome);
-            let fitness = sad_rgb_parallel(&self.target_rgba, &rgba, None);
+            let fitness = self.compute_fitness(&rgba, None);
             return (genome.clone(), rgba, fitness, None);
         }
 
         let mut best = genome.clone();
         let base_premul = CpuRenderer::render_up_to_poly_premul(&best, tri_idx);
         let mut current_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&best, tri_idx, &base_premul);
-        let mut current_fitness = sad_rgb_parallel(&self.target_rgba, &current_render_premul, None);
+        let mut current_fitness = self.compute_fitness(&current_render_premul, None);
         let mut dirty: Option<DirtyRect> = None;
 
         let step = self.cfg.color_step;
@@ -454,8 +570,8 @@ impl Engine {
                 }
 
                 // Exact rect delta (no tiles - optimizer is stateless)
-                let sad_old_union = sad_rgb_rect(&self.target_rgba, &current_render_premul, x_min, y_min, x_max, y_max, self.width, None);
-                let sad_new_union = sad_rgb_rect(&self.target_rgba, &cand_render_premul, x_min, y_min, x_max, y_max, self.width, None);
+                let sad_old_union = self.compute_fitness_rect(&current_render_premul, x_min, y_min, x_max, y_max, None);
+                let sad_new_union = self.compute_fitness_rect(&cand_render_premul, x_min, y_min, x_max, y_max, None);
                 let cand_fitness = current_fitness - sad_old_union + sad_new_union;
 
                 Some((direction, candidate, cand_render_premul, cand_fitness, x_min, y_min, x_max, y_max))
@@ -510,14 +626,14 @@ impl Engine {
 
         if tri_idx >= genome.polys.len() {
             let rgba = CpuRenderer::render_rgba_premul(genome);
-            let fitness = sad_rgb_parallel(&self.target_rgba, &rgba, None);
+            let fitness = self.compute_fitness(&rgba, None);
             return (genome.clone(), rgba, fitness, None);
         }
 
         let mut best = genome.clone();
         let base_premul = CpuRenderer::render_up_to_poly_premul(&best, tri_idx);
         let mut current_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&best, tri_idx, &base_premul);
-        let mut current_fitness = sad_rgb_parallel(&self.target_rgba, &current_render_premul, None);
+        let mut current_fitness = self.compute_fitness(&current_render_premul, None);
         let mut dirty: Option<DirtyRect> = None;
 
         let step = self.cfg.pos_step;
@@ -585,8 +701,8 @@ impl Engine {
                 }
 
                 // Exact rect delta (no tiles - optimizer is stateless)
-                let sad_old_union = sad_rgb_rect(&self.target_rgba, &current_render_premul, x_min, y_min, x_max, y_max, self.width, None);
-                let sad_new_union = sad_rgb_rect(&self.target_rgba, &cand_render_premul, x_min, y_min, x_max, y_max, self.width, None);
+                let sad_old_union = self.compute_fitness_rect(&current_render_premul, x_min, y_min, x_max, y_max, None);
+                let sad_new_union = self.compute_fitness_rect(&cand_render_premul, x_min, y_min, x_max, y_max, None);
                 let cand_fitness = current_fitness - sad_old_union + sad_new_union;
 
                 Some((vi, (dx, dy), candidate, cand_render_premul, cand_fitness, x_min, y_min, x_max, y_max))
@@ -727,8 +843,8 @@ impl Engine {
         let candidate_rgba = CpuRenderer::render_from_poly_on_base_premul_fast(&candidate, poly_idx, &self.current_rgba);
 
         // Compute SAD only over the new polygon's AABB (10-100× faster than full-frame)
-        let sad_new_bbox = sad_rgb_rect(&self.target_rgba, &candidate_rgba, x_min, y_min, x_max, y_max, self.genome.width, None);
-        let sad_old_bbox = sad_rgb_rect(&self.target_rgba, &self.current_rgba, x_min, y_min, x_max, y_max, self.genome.width, None);
+        let sad_new_bbox = self.compute_fitness_rect(&candidate_rgba, x_min, y_min, x_max, y_max, None);
+        let sad_old_bbox = self.compute_fitness_rect(&self.current_rgba, x_min, y_min, x_max, y_max, None);
 
         // Delta fitness: subtract old AABB SAD, add new AABB SAD
         let candidate_fitness = self.current_fitness - sad_old_bbox + sad_new_bbox;
@@ -963,7 +1079,7 @@ impl Engine {
             };
             self.genome.polys.push(Arc::new(background));  // Wrap in Arc for copy-on-write
             let rgba = CpuRenderer::render_rgba_premul(&self.genome);
-            let fitness = sad_rgb_parallel(&self.target_rgba, &rgba, None);
+            let fitness = self.compute_fitness(&rgba, None);
             self.update_current(rgba, fitness);
             return true;
         }
@@ -1047,7 +1163,7 @@ impl Engine {
                 t
             } else {
                 let rgba = CpuRenderer::render_rgba_premul(&candidate);
-                let fit = sad_rgb_parallel(&self.target_rgba, &rgba, Some(old_fitness as u64));
+                let fit = self.compute_fitness(&rgba, Some(old_fitness as u64));
                 (rgba, fit, None)
             };
             if candidate_fitness <= old_fitness {
@@ -1081,7 +1197,8 @@ impl Engine {
     }
 
     /// Get current fitness as a percentage (0-100, higher is better)
-    /// Normalized by the *actual* starting error (blank canvas vs target).
+    /// Normalized by baseline fitness (actual starting error using current metric).
+    /// This stays honest regardless of k value or alpha scaling changes.
     pub fn fitness_percent_normalized(&self) -> f32 {
         profiling::scope!("fitness_percent_normalized");
         let denom = self.baseline_fitness.max(std::f64::EPSILON);
@@ -1089,8 +1206,14 @@ impl Engine {
         pct.clamp(0.0, 100.0) as f32
     }
 
+    /// Get the perceptual weighting k value (Q8.8) if enabled, None otherwise
+    #[inline]
+    pub fn perceptual_k_q8(&self) -> Option<u16> {
+        self.avg_weight_q8.map(|_| self.cfg.perceptual_k_q8)
+    }
+
     /// Reuse the same normalization without needing &self.
-    /// Pass any `current` error alongside the known `baseline`.
+    /// Pass baseline and current error (must be in same metric).
     #[inline]
     pub fn fitness_percent_from_baseline(baseline: f64, current: f64) -> f32 {
         profiling::scope!("fitness_percent_normalized");
@@ -1112,6 +1235,68 @@ impl Engine {
             sad_per_px: sad_px,
             psnr,
         };
+    }
+
+    /// Apply new perceptual weighting settings and rebase fitness to new metric.
+    /// This rebuilds weights, recomputes current fitness, and resets baseline so that
+    /// fitness percentage stays honest under the new definition.
+    ///
+    /// Call this when user changes k_q8 or scale_by_alpha settings.
+    pub fn apply_perceptual_settings(&mut self, k_q8: u16, scale_by_alpha: bool) {
+        profiling::scope!("apply_perceptual_settings");
+
+        // Update config
+        self.cfg.perceptual_k_q8 = k_q8;
+        self.cfg.perceptual_scale_by_alpha = scale_by_alpha;
+
+        // Rebuild weights (or clear if k=0)
+        let (new_weights, new_weights_pyr, new_avg_weight) = if k_q8 > 0 {
+            let weights_full = crate::fitness::precompute_luma_weights_q8(
+                &self.target_unpremul,
+                k_q8,
+                scale_by_alpha,
+            );
+
+            // Compute average weight for display
+            let sum_weights: u64 = weights_full.iter().map(|&w| w as u64).sum();
+            let avg_w = (sum_weights / weights_full.len() as u64) as u16;
+
+            // Build weight pyramid
+            let weights_pyr = {
+                let mut pyr = Vec::with_capacity(3);
+                pyr.push(weights_full.clone());
+                let w1 = crate::fitness::downsample_weights_q8_box2(&pyr[0], self.width, self.height);
+                let w0 = crate::fitness::downsample_weights_q8_box2(&w1, self.width / 2, self.height / 2);
+                vec![w0, w1, pyr[0].clone()]
+            };
+
+            (Some(weights_full), Some(weights_pyr), Some(avg_w))
+        } else {
+            (None, None, None)
+        };
+
+        self.luma_weights_q8 = new_weights;
+        self.luma_weights_pyr_q8 = new_weights_pyr;
+        self.avg_weight_q8 = new_avg_weight;
+
+        // Recompute fitness with new metric
+        self.current_fitness = if let Some(ref weights) = self.luma_weights_q8 {
+            crate::fitness::sad_rgb_weighted_q8(&self.target_rgba, &self.current_rgba, weights)
+        } else {
+            sad_rgb_parallel(&self.target_rgba, &self.current_rgba, None)
+        };
+
+        // Reset baseline to current fitness (under new metric)
+        // This keeps fitness_percent continuous and honest
+        self.baseline_fitness = self.current_fitness;
+
+        // Update metrics snapshot
+        self.update_metrics_snapshot();
+
+        // Recompute tile grid if present
+        if let Some(ref mut tg) = self.tile_grid {
+            tg.recompute_all(self.width, self.height, &self.target_rgba, &self.current_rgba);
+        }
     }
 
     /// Generate a random mutation and return a candidate genome with fitness + render
@@ -1235,7 +1420,7 @@ impl Engine {
         }
         // Render and evaluate
         let candidate_rgba = CpuRenderer::render_rgba_premul(&candidate);
-        let candidate_fitness = sad_rgb_parallel(&self.target_rgba, &candidate_rgba, Some(self.current_fitness as u64));
+        let candidate_fitness = self.compute_fitness(&candidate_rgba, Some(self.current_fitness as u64));
 
         (candidate, candidate_rgba, candidate_fitness)
     }

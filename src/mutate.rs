@@ -47,6 +47,10 @@ pub struct MutateConfig {
     // fast fitness evaluation
     pub use_pyramid_fitness: bool,  // Use coarse-to-fine pyramid for faster fitness (experimental)
     pub use_tiled_fitness: bool,    // Use tiled error cache for incremental fitness (recommended)
+
+    // perceptual weighting (luminance-based emphasis for bright regions)
+    pub perceptual_k_q8: u16,  // Q8.8 fixed-point weight parameter (0=off, 48≈balanced, 32-96 typical)
+    pub perceptual_scale_by_alpha: bool,  // If true, multiply weight by (alpha/255). Default: false (premul RGB already encodes coverage)
 }
 
 impl Default for MutateConfig {
@@ -87,6 +91,10 @@ impl Default for MutateConfig {
             // fast fitness (enabled by default - both are proven safe)
             use_pyramid_fitness: true,
             use_tiled_fitness: true,
+
+            // perceptual weighting (disabled by default - user opt-in)
+            perceptual_k_q8: 0,  // 0 = off (no perceptual weighting)
+            perceptual_scale_by_alpha: false,  // Don't scale by alpha (premul already encodes coverage)
         }
     }
 }

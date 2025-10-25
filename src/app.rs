@@ -95,6 +95,8 @@ struct EngineUpdate {
     focus_region: Option<FocusRegion>,  // actual region being used by engine for mutations
     focus_tile_indices: Option<Vec<usize>>,  // indices of tiles that contributed to focus_region
     metrics: crate::fitness::MetricsSnapshot,  // resolution-invariant metrics (PSNR, SAD/px)
+    weighted_sad: Option<f64>,  // Raw weighted SAD value (only present when perceptual weighting enabled)
+    perceptual_k: Option<u16>,  // k value if perceptual weighting enabled (for display)
 }
 
 pub struct MiraiApp {
@@ -118,6 +120,8 @@ pub struct MiraiApp {
     fitness: f32,
     triangles: usize,
     metrics: crate::fitness::MetricsSnapshot,  // resolution-invariant metrics
+    weighted_sad: Option<f64>,  // Raw weighted SAD (when perceptual weighting enabled)
+    perceptual_k: Option<u16>,  // k value (Q8.8) for perceptual weighting display
 
     // focus region for targeted evolution
     focus_region: Option<FocusRegion>,
@@ -161,6 +165,8 @@ impl MiraiApp {
             fitness: 0.0,
             triangles: 0,
             metrics: crate::fitness::MetricsSnapshot::default(),
+            weighted_sad: None,
+            perceptual_k: None,
             focus_region: None,
             drag_start: None,
             autofocus_tiles: None,
@@ -227,6 +233,8 @@ impl MiraiApp {
                         focus_region: None,
                         focus_tile_indices: None,
                         metrics: engine.last_metrics,
+                        weighted_sad: engine.avg_weight_q8.map(|_| engine.current_fitness),
+                        perceptual_k: engine.perceptual_k_q8(),
                     });
 
                     loop {
@@ -271,14 +279,19 @@ impl MiraiApp {
                             let update_tx_clone = update_tx.clone();
                             let ctx_clone_inner = ctx_clone.clone();
 
-                            let baseline = engine.baseline_fitness;
+                            let baseline = engine.baseline_fitness;  // For percent normalization
                             let current_generation = engine.generation;
                             let img_width = engine.width;
                             let img_height = engine.height;
                             let psnr_peak = engine.metrics_settings.psnr_peak;
+                            let avg_weight = engine.avg_weight_q8;  // For weighted SAD display only
+                            let perceptual_k = engine.perceptual_k_q8();  // k value if weighted, None otherwise
 
                             let mut update_callback = |_genome: &crate::dna::Genome, rgba: &[u8], fitness_val: f64, _improved: bool| {
-                                let fitness_percent = crate::engine::Engine::fitness_percent_from_baseline(baseline, fitness_val);
+                                let fitness_percent = crate::engine::Engine::fitness_percent_from_baseline(
+                                    baseline,
+                                    fitness_val,
+                                );
 
                                 // Compute metrics snapshot from fitness_val
                                 let sad = fitness_val;
@@ -301,6 +314,8 @@ impl MiraiApp {
                                     focus_region: None,
                                     focus_tile_indices: None,
                                     metrics,
+                                    weighted_sad: avg_weight.map(|_| fitness_val),
+                                    perceptual_k,
                                 });
                                 ctx_clone_inner.request_repaint();
                             };
@@ -328,6 +343,8 @@ impl MiraiApp {
                                 focus_region: engine.focus_region,
                                 focus_tile_indices,
                                 metrics: engine.last_metrics,
+                                weighted_sad: engine.avg_weight_q8.map(|_| engine.current_fitness),
+                                perceptual_k: engine.perceptual_k_q8(),
                             });
                             ctx_clone.request_repaint();
                         } else {
@@ -604,6 +621,8 @@ impl MiraiApp {
                 self.fitness = update.fitness;
                 self.triangles = update.triangles;
                 self.metrics = update.metrics;
+                self.weighted_sad = update.weighted_sad;
+                self.perceptual_k = update.perceptual_k;
 
                 // throttled texture upload: only upload if enough time has elapsed OR counter threshold reached
                 if self.upload_gate.should_upload() {
@@ -976,6 +995,92 @@ impl MiraiApp {
                                 ui.label("  • 32px: fine granularity, higher overhead");
                                 ui.label("  • 64px: balanced (recommended)");
                                 ui.label("  • 128px: coarse, lower overhead");
+                            });
+                        });
+
+                    ui.add_space(10.0);
+
+                    // Perceptual Weighting
+                    egui::CollapsingHeader::new(egui::RichText::new("🎨 Perceptual Weighting").heading())
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("⟳ Applies to new images")
+                                .color(egui::Color32::from_rgb(200, 150, 100))
+                                .small());
+                            ui.add_space(5.0);
+
+                            ui.label("Emphasize bright-region errors without full linear-space conversion.");
+                            ui.label("Fixes sRGB undercounting: errors in highlights weighted more heavily.");
+                            ui.add_space(8.0);
+
+                            // Enable toggle
+                            ui.horizontal(|ui| {
+                                ui.label("Enable Perceptual Weighting:");
+                                ui.checkbox(&mut self.settings.perceptual_enabled, "");
+                            });
+                            ui.label("  Apply luminance-based weights to fitness calculation");
+                            ui.add_space(8.0);
+
+                            // Only show controls when enabled
+                            ui.add_enabled_ui(self.settings.perceptual_enabled, |ui| {
+                                ui.label(egui::RichText::new("Strength Presets:").strong());
+                                ui.add_space(3.0);
+
+                                // Preset buttons (horizontal row)
+                                ui.horizontal(|ui| {
+                                    if ui.button("Off (0)").on_hover_text("Disable weighting").clicked() {
+                                        self.settings.perceptual_k_q8 = 0;
+                                        self.settings.perceptual_enabled = false;
+                                    }
+                                    if ui.button("Subtle (32)").on_hover_text("~12% extra weight at pure white").clicked() {
+                                        self.settings.perceptual_k_q8 = 32;
+                                    }
+                                    if ui.button("Balanced (48)").on_hover_text("~19% extra weight at pure white (default)").clicked() {
+                                        self.settings.perceptual_k_q8 = 48;
+                                    }
+                                    if ui.button("Aggressive (96)").on_hover_text("~38% extra weight at pure white").clicked() {
+                                        self.settings.perceptual_k_q8 = 96;
+                                    }
+                                });
+                                ui.add_space(5.0);
+
+                                // Custom slider
+                                ui.horizontal(|ui| {
+                                    ui.label("Custom k value:");
+                                    let mut k_int = self.settings.perceptual_k_q8 as i32;
+                                    ui.add(egui::Slider::new(&mut k_int, 0..=128)
+                                        .text("Q8.8"));
+                                    self.settings.perceptual_k_q8 = k_int as u16;
+                                });
+                                ui.label("  Q8.8 fixed-point (256 = 1.0)");
+                                ui.add_space(5.0);
+
+                                // Help text
+                                ui.label(egui::RichText::new("💡 How it works:").strong());
+                                ui.label("  • Higher values = brighter regions weighted more");
+                                ui.label("  • k=48 (default) adds ~19% extra weight at pure white");
+                                ui.label("  • Cost: ~1 integer multiply + shift per pixel (very cheap)");
+                                ui.label("  • No gamma conversion - uses BT.709 luma approximation");
+                                ui.add_space(8.0);
+
+                                // Advanced: alpha scaling toggle
+                                ui.horizontal(|ui| {
+                                    ui.label("Scale weight by alpha (advanced):");
+                                    ui.checkbox(&mut self.settings.perceptual_scale_by_alpha, "");
+                                });
+                                ui.label("  Further reduce weight for transparent pixels");
+                                ui.label("  • Default: OFF (premultiplied RGB already encodes coverage)");
+                                ui.label("  • Enable to de-emphasize translucent highlights");
+                                ui.add_space(8.0);
+
+                                // Debug: weight map visualization
+                                ui.horizontal(|ui| {
+                                    ui.label("Show weight map overlay (debug):");
+                                    ui.checkbox(&mut self.settings.perceptual_show_weight_map, "");
+                                });
+                                ui.label("  Visualize per-pixel weights as grayscale overlay");
+                                ui.label("  • Brighter = higher weight (more emphasis)");
+                                ui.label("  • Useful for tuning k value");
                             });
                         });
 
@@ -1393,6 +1498,17 @@ impl eframe::App for MiraiApp {
                         }
                     }
 
+                    // Show weighted SAD when perceptual weighting is enabled
+                    if let (Some(wsad), Some(k)) = (self.weighted_sad, self.perceptual_k) {
+                        ui.separator();
+                        ui.label(format!("Weighted SAD: {:.0}", wsad))
+                            .on_hover_text(format!(
+                                "Perceptual weighted SAD (k={}{})\nHigher k = more emphasis on bright regions",
+                                k,
+                                if self.settings.perceptual_scale_by_alpha { ", ×α" } else { "" }
+                            ));
+                    }
+
                     ui.separator();
                     ui.label(format!("Polygons: {}", self.triangles));
                 }
@@ -1488,6 +1604,13 @@ impl eframe::App for MiraiApp {
                                 self.metrics.psnr, self.metrics.sad_per_px))
                                 .on_hover_text("*PSNR approximated from L1 (SAD), not true L2");
                         }
+                    }
+
+                    // Show weighted SAD in status bar when perceptual weighting is enabled
+                    if let (Some(wsad), Some(k)) = (self.weighted_sad, self.perceptual_k) {
+                        ui.separator();
+                        ui.weak(format!("Weighted: {:.0} (k={})", wsad, k))
+                            .on_hover_text("Perceptual weighted SAD\nBright regions weighted more heavily");
                     }
                 } else {
                     ui.label("No active session");
