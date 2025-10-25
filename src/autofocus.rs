@@ -1,6 +1,6 @@
 /// adaptive autofocus algorithms: Quadtree and BSP Tree
 /// these provide more intelligent tile subdivision compared to uniform grids
-use crate::app::FocusRegion;
+use crate::app_types::FocusRegion;
 use crate::fitness::sad_rgb_rect;
 use rayon::prelude::*;
 

@@ -1,6 +1,6 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use crate::app::FocusRegion;
+use crate::app_types::FocusRegion;
 use std::sync::{Arc, OnceLock};
 
 /// a polygon with 3-6 points and color stored as un-premultiplied. also caches a T-S path

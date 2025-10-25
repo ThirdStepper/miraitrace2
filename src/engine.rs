@@ -8,7 +8,7 @@ use crate::fitness::{build_pyramid_rgba, poly_bounds_aa, sad_rgb_parallel, sad_r
 use crate::mutate::MutateConfig;
 use crate::render::CpuRenderer;
 use crate::analysis::find_dominant_color;
-use crate::app::FocusRegion;
+use crate::app_types::FocusRegion;
 use crate::geom::DirtyRect;
 
 /// Throttles UI updates during optimization to reduce overhead

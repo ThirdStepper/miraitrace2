@@ -1,13 +1,16 @@
 mod app;
+mod app_types;
 mod dna;
+mod engine;
+mod engine_thread;
 mod render;
 mod mutate;
 mod fitness;
-mod engine;
 mod analysis;
 mod autofocus;
 mod settings;
 mod geom;
+mod ui;
 
 fn main() -> eframe::Result<()> {
     // configure Rayon's global thread pool once at startup so worker threads get nice names like "rayon-0".

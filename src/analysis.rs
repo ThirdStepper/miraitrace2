@@ -1,5 +1,5 @@
 use crate::fitness::sad_rgb_rect;
-use crate::app::FocusRegion;
+use crate::app_types::FocusRegion;
 use rayon::prelude::*;
 
 /// find the dominant color in an image (matches Evolve's analysis.cpp).
