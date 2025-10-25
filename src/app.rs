@@ -141,7 +141,6 @@ impl MiraiApp {
         let settings = crate::settings::AppSettings::load();
 
         // apply settings to global state
-        crate::mutate::set_gui_update_rate(settings.gui_update_rate);
         crate::render::set_polygon_antialiasing(settings.polygon_antialiasing);
 
         Self {
@@ -634,8 +633,7 @@ impl MiraiApp {
                 // Apply, Save, and Reset buttons at the top
                 ui.horizontal(|ui| {
                     if ui.button("Apply Settings").on_hover_text("Apply changes to current session").clicked() {
-                        // Apply settings to global state immediately (GUI rate & AA only)
-                        crate::mutate::set_gui_update_rate(self.settings.gui_update_rate);
+                        // Apply settings to global state immediately (AA only)
                         crate::render::set_polygon_antialiasing(self.settings.polygon_antialiasing);
 
                         // update UI upload gate to sync with new gui_update_rate (counter_interval = rate × 25)
@@ -659,7 +657,6 @@ impl MiraiApp {
 
                     if ui.button("Reset to Defaults").on_hover_text("Restore default settings").clicked() {
                         self.settings = crate::settings::AppSettings::default();
-                        crate::mutate::set_gui_update_rate(self.settings.gui_update_rate);
                         crate::render::set_polygon_antialiasing(self.settings.polygon_antialiasing);
                         self.upload_gate.update_gui_rate(self.settings.gui_update_rate);
                     }
