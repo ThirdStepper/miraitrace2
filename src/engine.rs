@@ -4,7 +4,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use crate::dna::{Genome, Polygon};
-use crate::fitness::{sad_rgb_parallel, sad_rgb_rect, poly_bounds_aa, build_pyramid_rgba, GaussianPyramid, TileGrid, RGBA_CHANNELS};
+use crate::fitness::{build_pyramid_rgba, poly_bounds_aa, sad_rgb_parallel, sad_rgb_rect, GaussianPyramid, TileGrid};
 use crate::mutate::MutateConfig;
 use crate::render::CpuRenderer;
 use crate::analysis::find_dominant_color;
@@ -1224,16 +1224,28 @@ impl Engine {
 
     /// Update cached metrics snapshot (SAD/px, pseudo-MSE, PSNR)
     /// Call this after fitness updates to keep metrics in sync.
+    /// All metric math is centralized in MetricsSnapshot constructors.
     pub fn update_metrics_snapshot(&mut self) {
         profiling::scope!("update_metrics_snapshot");
         let sad = self.current_fitness;
-        let sad_px = crate::fitness::sad_per_pixel(sad, self.width, self.height);
-        let mse = crate::fitness::pseudo_mse_from_sad(sad, self.width, self.height, RGBA_CHANNELS);
-        let psnr = crate::fitness::psnr_from_mse(mse, self.metrics_settings.psnr_peak);
+        let num_px = (self.width as usize) * (self.height as usize);
 
-        self.last_metrics = crate::fitness::MetricsSnapshot {
-            sad_per_px: sad_px,
-            psnr,
+        // Use constructors to centralize metric math (prevents drift between callsites)
+        self.last_metrics = if self.avg_weight_q8.is_some() {
+            // Weighted path: compute sad_per_px from weighted SAD, PSNR from normalized SAD
+            crate::fitness::MetricsSnapshot::from_sad_weighted_normalized(
+                sad,
+                num_px,
+                self.avg_weight_q8,
+                self.metrics_settings.psnr_peak as f32,
+            )
+        } else {
+            // Unweighted path: compute both from raw SAD
+            crate::fitness::MetricsSnapshot::from_sad(
+                sad,
+                num_px,
+                self.metrics_settings.psnr_peak as f32,
+            )
         };
     }
 

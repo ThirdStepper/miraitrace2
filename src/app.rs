@@ -1,8 +1,10 @@
 use eframe::egui::{self, ColorImage, Image, TextureHandle, TextureOptions};
-use crate::engine::Engine;
 use std::sync::{mpsc::{self, Receiver, Sender}, Arc};
 use std::thread;
 use std::time::Instant;
+
+use crate::engine::Engine;
+// Removed unused imports - metrics now computed via constructors
 
 /// UI upload throttling to reduce GPU bandwidth and improve performance on large images
 /// min_interval_ms is the minimum time between uploads
@@ -293,14 +295,23 @@ impl MiraiApp {
                                     fitness_val,
                                 );
 
-                                // Compute metrics snapshot from fitness_val
+                                // Compute metrics snapshot from fitness_val using constructors
+                                // (centralized metric math prevents drift between callsites)
                                 let sad = fitness_val;
-                                let sad_px = crate::fitness::sad_per_pixel(sad, img_width, img_height);
-                                let mse = crate::fitness::pseudo_mse_from_sad(sad, img_width, img_height, crate::fitness::RGBA_CHANNELS);
-                                let psnr = crate::fitness::psnr_from_mse(mse, psnr_peak);
-                                let metrics = crate::fitness::MetricsSnapshot {
-                                    sad_per_px: sad_px,
-                                    psnr,
+                                let num_px = (img_width as usize) * (img_height as usize);
+                                let metrics = if avg_weight.is_some() {
+                                    crate::fitness::MetricsSnapshot::from_sad_weighted_normalized(
+                                        sad,
+                                        num_px,
+                                        avg_weight,
+                                        psnr_peak as f32,
+                                    )
+                                } else {
+                                    crate::fitness::MetricsSnapshot::from_sad(
+                                        sad,
+                                        num_px,
+                                        psnr_peak as f32,
+                                    )
                                 };
 
                                 // send incremental update (throttled by counter in optimization functions)
