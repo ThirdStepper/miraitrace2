@@ -4,7 +4,7 @@ mod dna;
 mod engine;
 mod engine_thread;
 mod render;
-mod mutate;
+mod mutation_config;
 mod fitness;
 mod analysis;
 mod autofocus;

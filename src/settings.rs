@@ -363,9 +363,9 @@ impl AppSettings {
     }
 
     /// Convert to MutateConfig for the evolution engine
-    pub fn to_mutate_config(&self) -> crate::mutate::MutateConfig {
+    pub fn to_mutate_config(&self) -> crate::mutation_config::MutateConfig {
         let (min_vertices, max_vertices) = self.vertex_limits();
-        crate::mutate::MutateConfig {
+        crate::mutation_config::MutateConfig {
             p_add: self.p_add,
             p_remove: self.p_remove,
             p_reorder: self.p_reorder,
