@@ -13,7 +13,7 @@ use rayon::prelude::*;
 
 use crate::dna::{Genome, Polygon};
 use crate::fitness::{build_pyramid_rgba, sad_rgb_parallel, sad_rgb_rect, GaussianPyramid, TileGrid};
-use crate::mutate::MutateConfig;
+use crate::mutation_config::MutateConfig;
 use crate::render::CpuRenderer;
 use crate::analysis::find_dominant_color;
 use crate::app_types::FocusRegion;

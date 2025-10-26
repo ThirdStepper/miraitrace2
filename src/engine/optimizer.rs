@@ -38,7 +38,7 @@ impl Engine {
         let mut dirty: Option<DirtyRect> = None;
 
         let step = self.cfg.color_step;
-        use crate::mutate::ColorDirection;
+        use crate::mutation_config::ColorDirection;
         const DIRECTIONS: [ColorDirection; 10] = [
             ColorDirection::Lighter,
             ColorDirection::Darker,
@@ -63,7 +63,7 @@ impl Engine {
 
                 let mut candidate = best.clone();
                 let poly = Arc::make_mut(&mut candidate.polys[tri_idx]);
-                crate::mutate::apply_color_direction(&mut poly.rgba, direction, step, &self.cfg);
+                crate::mutation_config::apply_color_direction(&mut poly.rgba, direction, step, &self.cfg);
                 poly.rgba[3] = poly.rgba[3].clamp(self.cfg.alpha_min, self.cfg.alpha_max);
 
                 let (x_min_new, y_min_new, x_max_new, y_max_new) =
