@@ -192,3 +192,113 @@ pub fn compute_tile_errors_by_mode(
         }
     }
 }
+
+/// Edge map storing gradient magnitude and direction for edge-aware polygon seeding
+#[derive(Clone, Debug)]
+#[allow(dead_code)]  // max_magnitude reserved for future debug/visualization
+pub struct EdgeMap {
+    pub magnitude: Vec<f32>,   // Edge strength at each pixel (0.0 = no edge, 1.0 = strong edge)
+    pub direction: Vec<f32>,   // Edge direction in radians (-π to π)
+    pub width: u32,
+    pub height: u32,
+    pub max_magnitude: f32,    // For normalization
+}
+
+impl EdgeMap {
+    /// Sample edge magnitude at a given pixel coordinate (with bounds checking)
+    #[inline]
+    pub fn sample_magnitude(&self, x: u32, y: u32) -> f32 {
+        if x >= self.width || y >= self.height {
+            return 0.0;
+        }
+        let idx = (y * self.width + x) as usize;
+        self.magnitude.get(idx).copied().unwrap_or(0.0)
+    }
+
+    /// Sample edge direction at a given pixel coordinate (with bounds checking)
+    #[inline]
+    pub fn sample_direction(&self, x: u32, y: u32) -> f32 {
+        if x >= self.width || y >= self.height {
+            return 0.0;
+        }
+        let idx = (y * self.width + x) as usize;
+        self.direction.get(idx).copied().unwrap_or(0.0)
+    }
+}
+
+/// Compute Sobel edge detection on RGBA image (uses luminance channel)
+/// Returns EdgeMap with gradient magnitude and direction at each pixel
+pub fn compute_sobel_edges(rgba: &[u8], width: u32, height: u32) -> EdgeMap {
+    profiling::scope!("compute_sobel_edges");
+
+    assert_eq!(rgba.len(), (width * height * 4) as usize);
+
+    let w = width as usize;
+    let h = height as usize;
+    let num_pixels = w * h;
+
+    // Convert to luminance (grayscale) for edge detection
+    // Using ITU-R BT.709 coefficients: Y = 0.2126*R + 0.7152*G + 0.0722*B
+    let mut luma = vec![0.0f32; num_pixels];
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y * w + x) * 4;
+            let r = rgba[idx] as f32;
+            let g = rgba[idx + 1] as f32;
+            let b = rgba[idx + 2] as f32;
+            luma[y * w + x] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        }
+    }
+
+    // Sobel kernels (3x3)
+    // Gx (horizontal edges):  [[-1, 0, 1],    Gy (vertical edges):  [[-1, -2, -1],
+    //                          [-2, 0, 2],                            [ 0,  0,  0],
+    //                          [-1, 0, 1]]                            [ 1,  2,  1]]
+
+    let mut magnitude = vec![0.0f32; num_pixels];
+    let mut direction = vec![0.0f32; num_pixels];
+    let mut max_mag = 0.0f32;
+
+    // Apply Sobel filter (skip 1-pixel border to avoid bounds checks)
+    for y in 1..(h - 1) {
+        for x in 1..(w - 1) {
+            // Sample 3x3 neighborhood
+            let tl = luma[(y - 1) * w + (x - 1)];
+            let tc = luma[(y - 1) * w + x];
+            let tr = luma[(y - 1) * w + (x + 1)];
+            let ml = luma[y * w + (x - 1)];
+            let mr = luma[y * w + (x + 1)];
+            let bl = luma[(y + 1) * w + (x - 1)];
+            let bc = luma[(y + 1) * w + x];
+            let br = luma[(y + 1) * w + (x + 1)];
+
+            // Compute gradients
+            let gx = -tl + tr - 2.0 * ml + 2.0 * mr - bl + br;
+            let gy = -tl - 2.0 * tc - tr + bl + 2.0 * bc + br;
+
+            // Magnitude and direction
+            let mag = (gx * gx + gy * gy).sqrt();
+            let dir = gy.atan2(gx); // -π to π
+
+            let idx = y * w + x;
+            magnitude[idx] = mag;
+            direction[idx] = dir;
+            max_mag = max_mag.max(mag);
+        }
+    }
+
+    // Normalize magnitude to [0, 1] range
+    if max_mag > 0.0 {
+        for mag in magnitude.iter_mut() {
+            *mag /= max_mag;
+        }
+    }
+
+    EdgeMap {
+        magnitude,
+        direction,
+        width,
+        height,
+        max_magnitude: max_mag,
+    }
+}

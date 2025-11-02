@@ -24,6 +24,7 @@ impl Engine {
 
         // Generate new polygon with smart color sampling (using current num_poly_points)
         // If focus region is set, constrain polygon to that region (matching Evolve's genPoly)
+        // Opt #10: Edge-aware seeding enabled via edge_map parameter
         let poly = self.genome.smart_polygon_in_region(
             &mut self.rng,
             &self.target_unpremul,   // sample colors from UNPREMULT
@@ -32,6 +33,9 @@ impl Engine {
             self.num_poly_points,
             self.focus_region.as_ref(),
             self.cfg.enforce_simple_convex,
+            self.edge_map.as_ref(),
+            self.cfg.edge_seeding_probability,
+            self.cfg.edge_seeding_vertex_range_px,
         );
 
         // Test if adding it improves fitness using AABB-scoped evaluation (massive speedup)

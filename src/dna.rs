@@ -57,6 +57,7 @@ impl Genome {
     }
 
     /// generate a polygon constrained to a specific focus region
+    /// With Opt #10 (edge-aware seeding): optionally uses edge map to spawn polygons along detected edges
     pub fn smart_polygon_in_region<R: Rng>(
         &self,
         rng: &mut R,
@@ -66,6 +67,9 @@ impl Genome {
         num_points: usize,
         region: Option<&FocusRegion>,
         enforce_simple_convex: bool,
+        edge_map: Option<&crate::analysis::EdgeMap>,
+        edge_probability: f32,
+        edge_vertex_range: f32,
     ) -> Polygon {
         profiling::scope!("smart_polygon_in_region");
         let w = self.width as f32;
@@ -81,12 +85,77 @@ impl Genome {
         let width_range = x_max - x_min;
         let height_range = y_max - y_min;
 
-        // generate random points within the region
+        // Opt #10: Edge-aware seeding - spawn polygons along detected edges
+        let use_edge_seeding = edge_map.is_some() && rng.random::<f32>() < edge_probability;
+
         let mut points = Vec::with_capacity(num_points);
-        for _ in 0..num_points {
-            let x = x_min + rng.random::<f32>() * width_range;
-            let y = y_min + rng.random::<f32>() * height_range;
-            points.push((x, y));
+        if use_edge_seeding {
+            // Edge-guided placement
+            let emap = edge_map.unwrap();
+
+            // Sample seed point weighted by edge magnitude within the focus region
+            // Build cumulative distribution for weighted sampling
+            let x_min_u = x_min.max(0.0) as u32;
+            let x_max_u = x_max.min(w - 1.0) as u32;
+            let y_min_u = y_min.max(0.0) as u32;
+            let y_max_u = y_max.min(h - 1.0) as u32;
+
+            let mut total_weight = 0.0f32;
+            let mut weights = Vec::new();
+
+            for y in y_min_u..=y_max_u {
+                for x in x_min_u..=x_max_u {
+                    let mag = emap.sample_magnitude(x, y);
+                    total_weight += mag + 0.01; // ε floor to allow non-edge regions
+                    weights.push((x, y, total_weight));
+                }
+            }
+
+            // Sample seed point
+            let (seed_x, seed_y, seed_dir) = if total_weight > 0.0 && !weights.is_empty() {
+                let threshold = rng.random::<f32>() * total_weight;
+                let mut sx = weights[0].0;
+                let mut sy = weights[0].1;
+                for &(x, y, cumulative) in &weights {
+                    if cumulative >= threshold {
+                        sx = x;
+                        sy = y;
+                        break;
+                    }
+                }
+                let dir = emap.sample_direction(sx, sy);
+                (sx as f32, sy as f32, dir)
+            } else {
+                // Fallback: no edges found, use center of region
+                ((x_min + x_max) / 2.0, (y_min + y_max) / 2.0, 0.0)
+            };
+
+            // Place vertices around seed point along edge tangent/normal directions
+            // tangent = (cos(dir), sin(dir)), normal = (-sin(dir), cos(dir))
+            let tangent = (seed_dir.cos(), seed_dir.sin());
+            let normal = (-seed_dir.sin(), seed_dir.cos());
+
+            for i in 0..num_points {
+                let angle = (i as f32 / num_points as f32) * 2.0 * std::f32::consts::PI;
+                let radius = edge_vertex_range * (0.5 + rng.random::<f32>() * 0.5); // 50-100% of range
+
+                // Offset along tangent/normal based on angle
+                let tx = tangent.0 * angle.cos() * radius;
+                let ty = tangent.1 * angle.cos() * radius;
+                let nx = normal.0 * angle.sin() * radius;
+                let ny = normal.1 * angle.sin() * radius;
+
+                let x = (seed_x + tx + nx).clamp(x_min, x_max - 1.0);
+                let y = (seed_y + ty + ny).clamp(y_min, y_max - 1.0);
+                points.push((x, y));
+            }
+        } else {
+            // Random placement (original logic)
+            for _ in 0..num_points {
+                let x = x_min + rng.random::<f32>() * width_range;
+                let y = y_min + rng.random::<f32>() * height_range;
+                points.push((x, y));
+            }
         }
 
         if enforce_simple_convex {

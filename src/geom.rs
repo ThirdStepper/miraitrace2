@@ -213,3 +213,10 @@ mod tests {
         assert!(signed_area(&pts) > 0.0);
     }
 }
+
+/// Compute polygon area using Shoelace formula (Opt #9 - tiny polygon cleanup)
+/// Returns absolute area in square pixels
+#[inline]
+pub fn polygon_area(points: &[(f32, f32)]) -> f32 {
+    signed_area(points).abs()
+}

@@ -65,6 +65,8 @@ pub struct Engine {
     #[allow(dead_code)]
     pub(self) luma_weights_pyr_q8: Option<Vec<Vec<u16>>>,  // Weight pyramid matching target_pyr levels (reserved for future pyramid-based weighted fitness)
     pub avg_weight_q8: Option<u16>,  // Average weight (Q8.8) for fitness normalization (weighted worst-case)
+    // Edge-aware polygon seeding (Opt #10)
+    pub(self) edge_map: Option<crate::analysis::EdgeMap>,  // Precomputed edge map (magnitude + direction) for edge-guided spawning
     pub width: u32,            // Cached image width
     pub height: u32,           // Cached image height
     pub generation: u64,       // Generation counter (incremented during optimization)
@@ -84,6 +86,13 @@ pub struct Engine {
     pub autofocus_probabilistic: bool,      // Probabilistic vs. deterministic worst-first
     pub autofocus_progressive: bool,        // Progressive grid refinement
     pub gui_update_rate: u32,               // How often to update progressive params (default: 4)
+    // EMA Hotspot Sampling (Opt #6) - always-on when autofocus enabled
+    pub(self) tile_ema: Vec<f32>,           // Per-tile exponential moving average of error
+    pub(self) tile_ema_initialized: bool,   // Cold-start flag (first autofocus pass initializes)
+    pub autofocus_ema_beta: f32,            // EMA smoothing factor (0.1 = 10% new, 90% old)
+    pub autofocus_ema_gamma: f32,           // Sharpness exponent (1.5 = emphasize hotspots)
+    pub autofocus_ema_top_k: u32,           // Top K tiles for sampling (16)
+    pub autofocus_ema_epsilon: f32,         // Floor weight (0.01 = 1% minimum)
     // UI update throttling
     pub(self) improvement_throttle: ImprovementThrottle,  // Centralized throttling for optimization callbacks
     // Resolution-Invariant Metrics
@@ -185,6 +194,15 @@ impl Engine {
             );
         }
 
+        // Precompute edge map for edge-aware polygon seeding (Opt #10)
+        // Uses unpremultiplied target for accurate edge detection
+        let edge_map = if cfg.edge_seeding_enabled {
+            profiling::scope!("precompute_edge_map");
+            Some(crate::analysis::compute_sobel_edges(&target_unpremul, width, height))
+        } else {
+            None
+        };
+
         // Save max_vertices before cfg is moved
         let initial_poly_points = cfg.max_vertices;
 
@@ -202,6 +220,7 @@ impl Engine {
             luma_weights_q8,
             luma_weights_pyr_q8,
             avg_weight_q8,
+            edge_map,
             width,
             height,
             generation: 0,
@@ -221,6 +240,13 @@ impl Engine {
             autofocus_probabilistic: init.autofocus_probabilistic,
             autofocus_progressive: init.autofocus_progressive,
             gui_update_rate: init.gui_update_rate,
+            // EMA Hotspot Sampling (Opt #6) - lazy init when autofocus first runs
+            tile_ema: Vec::new(),
+            tile_ema_initialized: false,
+            autofocus_ema_beta: init.autofocus_ema_beta,
+            autofocus_ema_gamma: init.autofocus_ema_gamma,
+            autofocus_ema_top_k: init.autofocus_ema_top_k,
+            autofocus_ema_epsilon: init.autofocus_ema_epsilon,
             // UI update throttling
             improvement_throttle: ImprovementThrottle::new(init.gui_update_rate),
             // Resolution-Invariant Metrics from EngineInit
@@ -437,6 +463,15 @@ impl Engine {
             if improved_count > 0 {
                 println!("Micro-polish (gen {}): improved {} / {} polygons",
                     self.generation, improved_count, self.genome.polys.len());
+            }
+        }
+
+        // Smart Reorder (Opt #7): periodically try local z-order optimization
+        if self.cfg.smart_reorder_enabled && self.generation > 0 && self.generation % self.cfg.smart_reorder_interval == 0 {
+            if let Some((new_genome, new_rgba, new_fitness)) = self.try_smart_reorder() {
+                self.genome = new_genome;
+                self.update_current(new_rgba, new_fitness);
+                println!("Smart reorder (gen {}): improved fitness", self.generation);
             }
         }
 

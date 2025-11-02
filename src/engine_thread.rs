@@ -323,6 +323,12 @@ pub fn update_current_texture(
         (w, h, rgba.to_vec())
     };
 
+    // TODO (Opt #8): Preview Supersampling - Apply SSAA here for cleaner UI rendering
+    // If settings.preview_supersample_enabled:
+    //   1. Render to offscreen buffer at (preview_w * scale, preview_h * scale)
+    //   2. Downsample using box/tent filter to (preview_w, preview_h)
+    //   3. This is UI-only enhancement - does NOT affect SVG export or fitness
+    // Current: Direct mapping from preview_data → ColorImage (no supersampling)
     let img = ColorImage::from_rgba_premultiplied([preview_w, preview_h], &preview_data);
 
     if let Some(tex) = current_tex.as_mut() {
