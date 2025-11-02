@@ -2,7 +2,7 @@ use crate::fitness::sad_rgb_rect;
 use crate::app_types::FocusRegion;
 use rayon::prelude::*;
 
-/// find the dominant color in an image (matches Evolve's analysis.cpp).
+/// find the dominant color in an image
 /// uses a quantized color space to find the most common color region,
 /// then averages all pixels in that region.
 pub fn find_dominant_color(rgba: &[u8]) -> [f32; 3] {
@@ -74,7 +74,6 @@ pub fn find_dominant_color(rgba: &[u8]) -> [f32; 3] {
 
 /// subdivide image into NxN grid and compute error (SAD) for each tile.
 /// returns Vec of (tile_index, sad_error, focus_region) sorted by error (worst first).
-/// matches Evolve's computeAutofocusFitness (widget.cpp:96-144).
 /// this enables adaptive autofocus: evolution concentrates on tiles with highest error.
 pub fn compute_tile_errors(
     target_premul: &[u8],

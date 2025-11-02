@@ -57,7 +57,7 @@ impl Genome {
     }
 
     /// generate a polygon constrained to a specific focus region
-    /// With Opt #10 (edge-aware seeding): optionally uses edge map to spawn polygons along detected edges
+    /// With edge-aware seeding: optionally uses edge map to spawn polygons along detected edges
     pub fn smart_polygon_in_region<R: Rng>(
         &self,
         rng: &mut R,
@@ -85,7 +85,7 @@ impl Genome {
         let width_range = x_max - x_min;
         let height_range = y_max - y_min;
 
-        // Opt #10: Edge-aware seeding - spawn polygons along detected edges
+        // Edge-aware seeding - spawn polygons along detected edges
         let use_edge_seeding = edge_map.is_some() && rng.random::<f32>() < edge_probability;
 
         let mut points = Vec::with_capacity(num_points);
@@ -179,7 +179,7 @@ impl Genome {
         let cx = (points.iter().map(|p| p.0).sum::<f32>() / num_points as f32).clamp(0.0, w - 1.0) as u32;
         let cy = (points.iter().map(|p| p.1).sum::<f32>() / num_points as f32).clamp(0.0, h - 1.0) as u32;
 
-        // sample 5 points: center, top, bottom, left, right (matching Evolve)
+        // sample 5 points: center, top, bottom, left, right 
         let samples = [
             (cx, cy),
             (cx, cy.saturating_sub(5)),                 // top

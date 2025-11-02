@@ -10,7 +10,7 @@ use crate::render::CpuRenderer;
 use super::Engine;
 
 impl Engine {
-    /// Try to add a new polygon with smart color sampling (matches Evolve's tryAddPoly).
+    /// Try to add a new polygon with smart color sampling
     /// Uses progressive detail: starts with 6 points, reduces to 3 over time.
     /// Optimizes immediately if successful. Returns true if accepted.
     pub(super) fn try_add_poly<F>(&mut self, update_callback: &mut F) -> bool
@@ -23,8 +23,8 @@ impl Engine {
         }
 
         // Generate new polygon with smart color sampling (using current num_poly_points)
-        // If focus region is set, constrain polygon to that region (matching Evolve's genPoly)
-        // Opt #10: Edge-aware seeding enabled via edge_map parameter
+        // If focus region is set, constrain polygon to that region
+        //Edge-aware seeding enabled via edge_map parameter
         let poly = self.genome.smart_polygon_in_region(
             &mut self.rng,
             &self.target_unpremul,   // sample colors from UNPREMULT
@@ -62,7 +62,7 @@ impl Engine {
             self.genome = candidate;
             self.update_current(candidate_rgba, candidate_fitness);
 
-            // Optimize the new polygon (matching Evolve's tryAddPoly lines 21-22)
+            // Optimize the new polygon
             // The update_callback will be called during optimization to send UI updates
             // The optimization functions are stateless - we commit with incremental tile updates
             let genome_ref = &self.genome.clone();
@@ -89,7 +89,7 @@ impl Engine {
         }
     }
 
-    /// Remove a random triangle (matches Evolve's removePoly).
+    /// Remove a random triangle
     /// If a focus region is set, ONLY removes polygons intersecting that region.
     /// Skips the mutation if no suitable polygon is found (strict focus discipline).
     pub(super) fn remove_poly(&mut self, candidate: &mut Genome) {
@@ -123,7 +123,7 @@ impl Engine {
         candidate.polys.remove(idx);
     }
 
-    /// Reorder a random triangle (matches Evolve's reorderPoly).
+    /// Reorder a random triangle
     /// Optimizes the reordered triangle.
     /// If a focus region is set, ONLY reorders polygons in that region (strict focus discipline).
     /// Returns Some((rgba, fitness, dirty_rect)) if mutation occurred, None otherwise.
@@ -181,7 +181,7 @@ impl Engine {
         None
     }
 
-    /// Move a vertex of a random polygon (matches Evolve's movePoint).
+    /// Move a vertex of a random polygon
     /// Optimizes the modified polygon.
     /// If a focus region is set, ONLY moves points of polygons in that region (strict focus discipline).
     /// Returns Some((rgba, fitness, dirty_rect)) if mutation occurred, None otherwise.

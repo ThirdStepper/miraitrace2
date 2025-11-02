@@ -30,7 +30,7 @@ impl CpuRenderer {
         let w = genome.width;
         let h = genome.height;
         let mut pix = sk::Pixmap::new(w, h).expect("pixmap");
-        // white background (classic Evolve-style)
+        // white background
         pix.fill(sk::Color::from_rgba(1.0, 1.0, 1.0, 1.0).unwrap());
 
         for poly in &genome.polys {

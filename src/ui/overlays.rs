@@ -100,7 +100,7 @@ pub fn draw_region_overlay(
         egui::pos2(x2, y2),
     );
 
-    // draw red rectangle (matching Evolve's QPen color QColor(200,0,0,150))
+    // draw red rectangle
     painter.rect_stroke(
         overlay_rect,
         0.0, // no corner rounding

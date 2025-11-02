@@ -118,7 +118,7 @@ pub struct AppSettings {
     /// Enable progressive grid refinement (start coarse, increase as fitness improves)
     pub autofocus_progressive: bool,
 
-    // EMA Hotspot Sampling (Opt #6) - always-on when autofocus enabled
+    // EMA Hotspot Sampling - always-on when autofocus enabled
     /// EMA smoothing factor (0.0-1.0, e.g., 0.1 = 10% new, 90% old)
     pub autofocus_ema_beta: f32,
     /// EMA sharpness exponent (>1 emphasizes hotspots, e.g., 1.5)
@@ -202,14 +202,14 @@ pub struct AppSettings {
     pub micro_polish_vertex_step: f32,
     /// Color step size for micro-polish (e.g., 1/255 = 0.004)
     pub micro_polish_color_step: f32,
-    /// Enable tiny-polygon cleanup during micro-polish (Opt #9)
+    /// Enable tiny-polygon cleanup during micro-polish
     pub micro_polish_cleanup_enabled: bool,
     /// Minimum area threshold for polygon cleanup (in square pixels, e.g., 8.0)
     pub micro_polish_min_area_px: f32,
     /// Fitness tolerance for cleanup (allow slight fitness loss, e.g., 0.001 = 0.1%)
     pub micro_polish_cleanup_epsilon: f32,
 
-    // Smart Layer Reorder (Opt #7) - Local z-order optimization
+    // Smart Layer Reorder - Local z-order optimization
     /// Enable smart reorder heuristic (bubble moves to optimize z-order)
     pub smart_reorder_enabled: bool,
     /// Maximum hops (steps up/down z-order) to test per reorder
@@ -243,7 +243,7 @@ pub struct AppSettings {
     /// Curve exponent for alpha schedule progression
     pub alpha_schedule_curve: f32,
 
-    // Edge-aware Polygon Seeding (Opt #10)
+    // Edge-aware Polygon Seeding
     /// Enable edge-aware seeding (spawn polygons along detected edges)
     pub edge_seeding_enabled: bool,
     /// Probability of using edge-guided seeding vs random (0.0-1.0, e.g., 0.7 = 70% edge, 30% random)
@@ -251,7 +251,7 @@ pub struct AppSettings {
     /// Vertex placement range along edges (in pixels, e.g., 12.0)
     pub edge_seeding_vertex_range_px: f32,
 
-    // Preview Supersampling (Opt #8) - UI-only enhancement
+    // Preview Supersampling - UI-only enhancement
     /// Enable preview supersampling (SSAA for cleaner UI rendering)
     pub preview_supersample_enabled: bool,
     /// Supersample scale factor (2.0 = 2x SSAA, 4x pixel cost)
@@ -280,7 +280,7 @@ impl Default for AppSettings {
             autofocus_probabilistic: false,     // Deterministic worst-first (exploit)
             autofocus_progressive: true,        // Progressive refinement (adaptive)
 
-            // EMA Hotspot Sampling defaults (Opt #6) - always-on when autofocus enabled
+            // EMA Hotspot Sampling defaults - always-on when autofocus enabled
             autofocus_ema_beta: 0.1,            // 10% new, 90% old (temporal smoothing)
             autofocus_ema_gamma: 1.5,           // Sharpness exponent (emphasizes hotspots)
             autofocus_ema_top_k: 16,            // Focus on top 16 tiles
@@ -290,7 +290,7 @@ impl Default for AppSettings {
             color_step: 5.0 / 255.0,  // N_COLOR_VAR = 5
             pos_step: 15.0,            // N_POS_VAR = 15
 
-            // Mutation probabilities (matching original Evolve)
+            // Mutation probabilities 
             p_add: 0.20,        // 20%
             p_remove: 0.15,     // 15%
             p_reorder: 0.15,    // 15%
@@ -302,7 +302,7 @@ impl Default for AppSettings {
             alpha_min: 20.0 / 255.0,
             alpha_max: 200.0 / 255.0,
 
-            // Triangle limits (matching original Evolve: POLYS_MIN=15000, POLYS_MAX=150000)
+            // Triangle limits
             min_tris: 15_000,
             max_tris: 150_000,
 
@@ -337,12 +337,12 @@ impl Default for AppSettings {
             micro_polish_interval: 1000,          // Every 1000 generations
             micro_polish_vertex_step: 1.0,        // 1 pixel nudges
             micro_polish_color_step: 1.0 / 255.0, // 1/255 color nudges
-            micro_polish_cleanup_enabled: true,   // Cleanup tiny polygons (Opt #9)
+            micro_polish_cleanup_enabled: true,   // Cleanup tiny polygons
             micro_polish_min_area_px: 8.0,        // Minimum 8 square pixels
             micro_polish_cleanup_epsilon: 0.001,  // 0.1% fitness tolerance
 
-            // Smart Layer Reorder (Opt #7) - enabled by default
-            smart_reorder_enabled: true,          // On by default (Opt #7)
+            // Smart Layer Reorder - enabled by default
+            smart_reorder_enabled: true,          // On by default
             smart_reorder_max_hops: 3,            // Test up to 3 positions up/down
             smart_reorder_interval: 500,          // Every 500 generations
             smart_reorder_error_percentile: 0.75, // Top 25% high-error polygons
@@ -361,12 +361,12 @@ impl Default for AppSettings {
             alpha_max_target: 250.0 / 255.0,      // Target: 250/255 = 0.98
             alpha_schedule_curve: 1.5,            // Curve exponent (smooth transition)
 
-            // Edge-aware Polygon Seeding (Opt #10) - enabled by default
-            edge_seeding_enabled: true,           // On by default (Opt #10)
+            // Edge-aware Polygon Seeding - enabled by default
+            edge_seeding_enabled: true,           // On by default 
             edge_seeding_probability: 0.7,        // 70% edge-guided, 30% random (exploration)
             edge_seeding_vertex_range_px: 12.0,   // ±12 pixels along edge directions
 
-            // Preview Supersampling (Opt #8) - enabled by default
+            // Preview Supersampling - enabled by default
             preview_supersample_enabled: true,    // On by default (UI-only, no SVG impact)
             preview_supersample_scale: 2.0,       // 2x SSAA (4x pixel cost, cleaner preview)
         }
@@ -396,7 +396,7 @@ pub struct EngineInit {
     pub autofocus_probabilistic: bool,
     pub autofocus_progressive: bool,
 
-    // EMA Hotspot Sampling (Opt #6)
+    // EMA Hotspot Sampling
     pub autofocus_ema_beta: f32,
     pub autofocus_ema_gamma: f32,
     pub autofocus_ema_top_k: u32,

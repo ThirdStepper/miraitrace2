@@ -1,6 +1,6 @@
 #[derive(Clone)]
 pub struct MutateConfig {
-    // nutation probabilities (match original Evolve exactly)
+    // nutation probabilities
     pub p_add: f32,        // chance to add a triangle (20% in original)
     pub p_remove: f32,     // chance to remove a triangle (15% in original)
     pub p_reorder: f32,    // chance to reorder z-index (15% in original)
@@ -11,7 +11,7 @@ pub struct MutateConfig {
     // mutation parameters (kept for potential future use)
     pub pos_sigma: f32,   // pixel jitter for vertices
 
-    // optimization step sizes (match original Evolve constants)
+    // optimization step sizes
     pub color_step: f32,  // step size for color optimization (N_COLOR_VAR = 5)
     pub pos_step: f32,    // step size for shape optimization (N_POS_VAR = 15)
 
@@ -46,11 +46,11 @@ pub struct MutateConfig {
     pub micro_polish_interval: u64,     // Run micro-polish every N generations
     pub micro_polish_vertex_step: f32,  // Vertex step size (e.g., 1.0 px)
     pub micro_polish_color_step: f32,   // Color step size (e.g., 1/255)
-    pub micro_polish_cleanup_enabled: bool,  // Enable tiny-polygon cleanup (Opt #9)
+    pub micro_polish_cleanup_enabled: bool,  // Enable tiny-polygon cleanup
     pub micro_polish_min_area_px: f32,  // Minimum area (square pixels)
     pub micro_polish_cleanup_epsilon: f32,  // Fitness tolerance for cleanup
 
-    // smart layer reorder (Opt #7) - local z-order optimization
+    // smart layer reorder - local z-order optimization
     pub smart_reorder_enabled: bool,    // Enable smart reorder heuristic
     pub smart_reorder_max_hops: u32,    // Max hops up/down to test
     pub smart_reorder_interval: u64,    // Run every N generations
@@ -70,7 +70,7 @@ pub struct MutateConfig {
     pub alpha_max_target: f32,          // Target maximum alpha (e.g., 0.98)
     pub alpha_schedule_curve: f32,      // Curve exponent for alpha progression
 
-    // edge-aware polygon seeding (Opt #10)
+    // edge-aware polygon seeding
     pub edge_seeding_enabled: bool,     // Enable edge-aware seeding
     pub edge_seeding_probability: f32,  // Probability of edge-guided vs random seeding (0.0-1.0)
     pub edge_seeding_vertex_range_px: f32,  // Vertex placement range along edges (pixels)
@@ -79,24 +79,24 @@ pub struct MutateConfig {
 impl Default for MutateConfig {
     fn default() -> Self {
         Self {
-            // probabilities matching original Evolve exactly (settings.cpp)
+            // probabilities matching original
             p_add: 0.20,        // POLYS_ADD_RATE = 20%
             p_remove: 0.15,     // POLYS_REMOVE_RATE = 15%
             p_reorder: 0.15,    // POLYS_REORDER_RATE = 15%
             p_move_point: 0.15, // POINT_MOVE_RATE = 15%
-            p_recolor: 0.05,    // New color-only mutation (5%)
+            p_recolor: 0.15,    // New color-only mutation (5%)
             // remainder: 30% = no mutation
 
-            // mutation parameters (match original Evolve)
+            // mutation parameters 
             pos_sigma: 10.0,     // ±10 pixels for random mutations
 
-            // optimization step sizes (match original Evolve exactly)
-            color_step: 5.0 / 255.0,  // N_COLOR_VAR = 5 in original Evolve
-            pos_step: 15.0,           // N_POS_VAR = 15 in original Evolve
+            // optimization step sizes 
+            color_step: 5.0 / 255.0,  
+            pos_step: 15.0,           
 
-            // limits (matching original Evolve: POLYS_MIN=15000, POLYS_MAX=150000)
-            min_tris: 15_000,    // Matching original Evolve POLYS_MIN
-            max_tris: 150_000,   // Matching original Evolve POLYS_MAX
+            // limits 
+            min_tris: 15_000,
+            max_tris: 150_000,
 
             // alpha range (20-200 in [0,255] → 0.078-0.784)
             alpha_min: 20.0 / 255.0,
@@ -125,11 +125,11 @@ impl Default for MutateConfig {
             micro_polish_interval: 1000,          // Every 1000 generations
             micro_polish_vertex_step: 1.0,        // 1 pixel nudges
             micro_polish_color_step: 1.0 / 255.0, // 1/255 color nudges
-            micro_polish_cleanup_enabled: true,   // Cleanup tiny polygons (Opt #9)
+            micro_polish_cleanup_enabled: true,   // Cleanup tiny polygons
             micro_polish_min_area_px: 8.0,        // Minimum 8 square pixels
             micro_polish_cleanup_epsilon: 0.001,  // 0.1% fitness tolerance
 
-            // smart layer reorder (enabled by default - Opt #7)
+            // smart layer reorder (enabled by default)
             smart_reorder_enabled: true,          // On by default
             smart_reorder_max_hops: 3,            // Test up to 3 positions up/down
             smart_reorder_interval: 500,          // Every 500 generations
@@ -149,7 +149,7 @@ impl Default for MutateConfig {
             alpha_max_target: 250.0 / 255.0,      // Target: 250/255 = 0.98
             alpha_schedule_curve: 1.5,            // Curve exponent (smooth transition)
 
-            // edge-aware polygon seeding (enabled by default - Opt #10)
+            // edge-aware polygon seeding (enabled by default)
             edge_seeding_enabled: true,           // On by default
             edge_seeding_probability: 0.7,        // 70% edge-guided, 30% random (exploration)
             edge_seeding_vertex_range_px: 12.0,   // ±12 pixels along edge directions

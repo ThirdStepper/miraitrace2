@@ -214,7 +214,7 @@ mod tests {
     }
 }
 
-/// Compute polygon area using Shoelace formula (Opt #9 - tiny polygon cleanup)
+/// Compute polygon area using Shoelace formula
 /// Returns absolute area in square pixels
 #[inline]
 pub fn polygon_area(points: &[(f32, f32)]) -> f32 {

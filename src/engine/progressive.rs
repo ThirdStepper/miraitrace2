@@ -4,7 +4,7 @@ use crate::app_types::FocusRegion;
 use super::Engine;
 
 impl Engine {
-    /// Update the number of polygon points based on current polygon count (matches Evolve's progressive detail).
+    /// Update the number of polygon points based on current polygon count
     /// For dynamic mode: starts at max_vertices, reduces progressively to min_vertices.
     /// For fixed arity modes (min == max): skips entirely (no progressive reduction).
     pub(super) fn update_poly_points(&mut self) {
@@ -216,7 +216,6 @@ impl Engine {
     }
 
     /// Update autofocus region by subdividing image into grid and finding tile with highest error.
-    /// Matches Evolve's computeAutofocusFitness (widget.cpp:96-144).
     ///
     /// This adaptively concentrates evolution effort on regions with highest error,
     /// providing 2-4x additional speedup on top of rect-local optimization.
@@ -257,7 +256,7 @@ impl Engine {
         // Store for UI visualization
         self.autofocus_last_tiles = Some(tiles.clone());
 
-        // Opt #6: EMA Hotspot Sampling - Update exponential moving averages and apply weighting
+        // EMA Hotspot Sampling - Update exponential moving averages and apply weighting
         // This concentrates mutations on persistent high-error regions
         if !self.tile_ema_initialized {
             // Cold start: initialize EMA with current errors
@@ -296,7 +295,7 @@ impl Engine {
         // Sort by EMA weight (highest weight first = persistent hotspots)
         ema_weighted_tiles.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Opt #6: Restrict to Top-K tiles (focus on worst hotspots only)
+        // Restrict to Top-K tiles (focus on worst hotspots only)
         let top_k = self.autofocus_ema_top_k as usize;
         if ema_weighted_tiles.len() > top_k {
             ema_weighted_tiles.truncate(top_k);

@@ -414,7 +414,7 @@ impl Engine {
             progress_callback(idx + 1, total_polys);
         }
 
-        // Opt #9: Tiny-polygon cleanup phase (combine with micro-polish)
+        // Tiny-polygon cleanup phase (combine with micro-polish)
         // Remove polygons below area threshold if fitness impact is negligible
         if self.cfg.micro_polish_cleanup_enabled {
             let min_area = self.cfg.micro_polish_min_area_px;
@@ -457,7 +457,7 @@ impl Engine {
         improved
     }
 
-    /// Smart layer reorder (Opt #7): Try bubble moves to optimize z-order locally
+    /// Smart layer reorder: Try bubble moves to optimize z-order locally
     /// Returns Some((genome, rgba, fitness)) if improvement found, None otherwise
     pub(super) fn try_smart_reorder(&mut self) -> Option<(Genome, Vec<u8>, f64)> {
         profiling::scope!("try_smart_reorder");
@@ -467,7 +467,7 @@ impl Engine {
             return None; // Need at least 2 polygons to reorder
         }
 
-        // Opt #7: Error-based polygon selection (target high-error polygons likely to have z-order issues)
+        // Error-based polygon selection (target high-error polygons likely to have z-order issues)
         let mut poly_errors: Vec<(usize, f64)> = Vec::with_capacity(num_polys);
         for idx in 0..num_polys {
             let bbox = poly_bounds_aa(&self.genome.polys[idx], self.width, self.height);

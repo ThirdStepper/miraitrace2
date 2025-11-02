@@ -83,7 +83,7 @@ pub fn show_settings_window(
                         ui.label("  Disable for faster rendering (may look jagged)");
                         ui.add_space(5.0);
 
-                        // Preview Supersampling (Opt #8)
+                        // Preview Supersampling
                         ui.horizontal(|ui| {
                             ui.label("Preview Supersampling:");
                             ui.checkbox(&mut settings.preview_supersample_enabled, "");
@@ -198,7 +198,7 @@ pub fn show_settings_window(
                             ui.add(egui::Slider::new(&mut settings.min_tris, 1..=50_000)
                                 .text("polygons"));
                         });
-                        ui.label("  (Original Evolve: 15,000)");
+                        ui.label("  (Default: 15,000)");
                         ui.add_space(5.0);
 
                         ui.horizontal(|ui| {
@@ -206,7 +206,7 @@ pub fn show_settings_window(
                             ui.add(egui::Slider::new(&mut settings.max_tris, 1_000..=999_999)
                                 .text("polygons"));
                         });
-                        ui.label("  (Original Evolve: 150,000)");
+                        ui.label("  (Default: 150,000)");
                         ui.add_space(10.0);
 
                         ui.separator();
@@ -345,8 +345,8 @@ pub fn show_settings_window(
                         ui.separator();
                         ui.add_space(8.0);
 
-                        // ---- EDGE-AWARE POLYGON SEEDING (Opt #10) ----
-                        ui.label(egui::RichText::new("Edge-Aware Polygon Seeding (Opt #10)").strong());
+                        // ---- EDGE-AWARE POLYGON SEEDING ----
+                        ui.label(egui::RichText::new("Edge-Aware Polygon Seeding").strong());
                         ui.add_space(3.0);
 
                         ui.horizontal(|ui| {
@@ -417,9 +417,9 @@ pub fn show_settings_window(
 
                             ui.add_space(8.0);
 
-                            // Tiny-Polygon Cleanup (Opt #9) - combined with micro-polish
+                            // Tiny-Polygon Cleanup - combined with micro-polish
                             ui.separator();
-                            ui.label(egui::RichText::new("  Tiny-Polygon Cleanup (Opt #9)").strong().color(egui::Color32::from_rgb(100, 200, 255)));
+                            ui.label(egui::RichText::new("  Tiny-Polygon Cleanup").strong().color(egui::Color32::from_rgb(100, 200, 255)));
                             ui.add_space(3.0);
 
                             ui.horizontal(|ui| {
@@ -452,8 +452,8 @@ pub fn show_settings_window(
                         ui.separator();
                         ui.add_space(8.0);
 
-                        // ---- SMART LAYER REORDER (Opt #7) ----
-                        ui.label(egui::RichText::new("Smart Layer Reorder (Opt #7)").strong());
+                        // ---- SMART LAYER REORDER ----
+                        ui.label(egui::RichText::new("Smart Layer Reorder").strong());
                         ui.add_space(3.0);
 
                         ui.horizontal(|ui| {
@@ -651,7 +651,7 @@ pub fn show_settings_window(
 
                         ui.add_space(5.0);
                         ui.separator();
-                        ui.label(egui::RichText::new("EMA Hotspot Sampling (Opt #6)").strong());
+                        ui.label(egui::RichText::new("EMA Hotspot Sampling").strong());
                         ui.add_space(3.0);
                         ui.label("  Temporal smoothing for persistent high-error regions");
                         ui.label("  • Always-on when autofocus enabled (no toggle)");

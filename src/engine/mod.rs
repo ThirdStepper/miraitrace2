@@ -68,14 +68,14 @@ pub struct Engine {
     #[allow(dead_code)]
     pub(self) luma_weights_pyr_q8: Option<Vec<Vec<u16>>>,  // Weight pyramid matching target_pyr levels (reserved for future pyramid-based weighted fitness)
     pub avg_weight_q8: Option<u16>,  // Average weight (Q8.8) for fitness normalization (weighted worst-case)
-    // Edge-aware polygon seeding (Opt #10)
+    // Edge-aware polygon seeding 
     pub(self) edge_map: Option<crate::analysis::EdgeMap>,  // Precomputed edge map (magnitude + direction) for edge-guided spawning
     pub width: u32,            // Cached image width
     pub height: u32,           // Cached image height
     pub generation: u64,       // Generation counter (incremented during optimization)
-    pub(self) num_poly_points: usize, // Progressive detail: starts at 6, reduces to 3 (matching Evolve)
+    pub(self) num_poly_points: usize, // Progressive detail: starts at 6, reduces to 3
     pub focus_region: Option<FocusRegion>, // Optional region for targeted evolution
-    // Autofocus settings (matches Evolve's adaptive focus system)
+    // Autofocus settings
     pub autofocus_enabled: bool,     // Enable/disable autofocus (default: true)
     pub autofocus_mode: crate::settings::AutofocusMode,  // Grid type: Uniform, Quadtree, or BSP
     pub autofocus_grid_size: u32,    // NxN grid subdivision (2-16 for UniformGrid, max tiles for BSP)
@@ -84,12 +84,12 @@ pub struct Engine {
     pub autofocus_interval: u64,     // Re-evaluate focus every N generations (default: 100)
     pub autofocus_last_tiles: Option<Vec<(usize, f64, FocusRegion)>>,  // Last computed tile errors for UI visualization
     pub autofocus_selected_indices: Option<Vec<usize>>,  // Which tile indices (positions in sorted array) are actively being used
-    // Advanced autofocus (Phase 3)
+    // Advanced autofocus
     pub autofocus_multi_tile_count: u32,    // Focus on top K tiles (1 = single, 2+ = multi)
     pub autofocus_probabilistic: bool,      // Probabilistic vs. deterministic worst-first
     pub autofocus_progressive: bool,        // Progressive grid refinement
     pub gui_update_rate: u32,               // How often to update progressive params (default: 4)
-    // EMA Hotspot Sampling (Opt #6) - always-on when autofocus enabled
+    // EMA Hotspot Sampling - always-on when autofocus enabled
     pub(self) tile_ema: Vec<f32>,           // Per-tile exponential moving average of error
     pub(self) tile_ema_initialized: bool,   // Cold-start flag (first autofocus pass initializes)
     pub autofocus_ema_beta: f32,            // EMA smoothing factor (0.1 = 10% new, 90% old)
@@ -197,7 +197,7 @@ impl Engine {
             );
         }
 
-        // Precompute edge map for edge-aware polygon seeding (Opt #10)
+        // Precompute edge map for edge-aware polygon seeding (10)
         // Uses unpremultiplied target for accurate edge detection
         let edge_map = if cfg.edge_seeding_enabled {
             profiling::scope!("precompute_edge_map");
@@ -247,7 +247,7 @@ impl Engine {
             autofocus_probabilistic: init.autofocus_probabilistic,
             autofocus_progressive: init.autofocus_progressive,
             gui_update_rate: init.gui_update_rate,
-            // EMA Hotspot Sampling (Opt #6) - lazy init when autofocus first runs
+            // EMA Hotspot Sampling - lazy init when autofocus first runs
             tile_ema: Vec::new(),
             tile_ema_initialized: false,
             autofocus_ema_beta: init.autofocus_ema_beta,
@@ -410,7 +410,7 @@ impl Engine {
         }
     }
 
-    /// One evolution step matching Evolve's run() loop (widget.cpp:276-347).
+    /// One evolution step
     /// Attempts multiple mutations per generation, evaluating independently.
     /// The update_callback is called during optimization to send incremental UI updates.
     pub fn step<F>(&mut self, update_callback: &mut F) -> bool
@@ -420,7 +420,7 @@ impl Engine {
         profiling::scope!("step");
         let polys_size = self.genome.polys.len();
 
-        // Initialize with dominant color background (matching Evolve widget.cpp:283-296)
+        // Initialize with dominant color background
         if polys_size == 0 {
             // dominant color must be computed on UNPREMULT
             let dom_color = find_dominant_color(&self.target_unpremul);
@@ -441,7 +441,7 @@ impl Engine {
             return true;
         }
 
-        // Progressive detail: adjust polygon point count based on current count (matching Evolve)
+        // Progressive detail: adjust polygon point count based on current count
         self.update_poly_points();
 
         // Progressive refinement: update autofocus parameters at GUI update rate for quick adaptation
@@ -452,7 +452,7 @@ impl Engine {
             self.update_alpha_schedule();
         }
 
-        // Autofocus: periodically re-evaluate which region has highest error (matching Evolve)
+        // Autofocus: periodically re-evaluate which region has highest error
         // This adaptively concentrates evolution effort where it's needed most
         if self.autofocus_enabled && self.generation % self.autofocus_interval == 0 {
             self.update_autofocus();
@@ -475,7 +475,7 @@ impl Engine {
             }
         }
 
-        // Smart Reorder (Opt #7): periodically try local z-order optimization
+        // Smart Reorder: periodically try local z-order optimization
         if self.cfg.smart_reorder_enabled && self.generation > 0 && self.generation % self.cfg.smart_reorder_interval == 0 {
             if let Some((new_genome, new_rgba, new_fitness)) = self.try_smart_reorder() {
                 self.genome = new_genome;

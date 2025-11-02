@@ -390,7 +390,7 @@ pub fn update_current_texture(
         (w, h, rgba.to_vec())
     };
 
-    // TODO (Opt #8): Preview Supersampling - Apply SSAA here for cleaner UI rendering
+    // TODO Preview Supersampling - Apply SSAA here for cleaner UI rendering
     // If settings.preview_supersample_enabled:
     //   1. Render to offscreen buffer at (preview_w * scale, preview_h * scale)
     //   2. Downsample using box/tent filter to (preview_w, preview_h)
