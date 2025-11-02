@@ -133,6 +133,8 @@ pub struct AppSettings {
     pub p_reorder: f32,
     /// Probability of moving a vertex per generation
     pub p_move_point: f32,
+    /// Probability of recoloring a polygon (color-only mutation) per generation
+    pub p_recolor: f32,
 
     // Alpha Range
     /// Minimum alpha (opacity) for triangles (0.0 = transparent, 1.0 = opaque)
@@ -180,6 +182,40 @@ pub struct AppSettings {
     pub metrics_settings: MetricsSettings,
     /// Termination condition flags (PSNR target, SAD/px threshold)
     pub termination_settings: TerminationSettings,
+
+    // Micro-Polish Pass (Periodic Global Refinement)
+    /// Enable periodic micro-polish pass (tiny vertex/color nudges on all polygons)
+    pub micro_polish_enabled: bool,
+    /// Run micro-polish every N generations
+    pub micro_polish_interval: u64,
+    /// Vertex step size for micro-polish (in pixels, e.g., 1.0)
+    pub micro_polish_vertex_step: f32,
+    /// Color step size for micro-polish (e.g., 1/255 = 0.004)
+    pub micro_polish_color_step: f32,
+
+    // Adaptive Step Sizes (Coarse → Fine)
+    /// Enable adaptive step size scaling (starts coarse, becomes fine as fitness improves)
+    pub adaptive_steps_enabled: bool,
+    /// Minimum step scale (fine, e.g., 0.25 = 25% of base step size)
+    pub step_scale_min: f32,
+    /// Maximum step scale (coarse, e.g., 1.0 = 100% of base step size)
+    pub step_scale_max: f32,
+    /// Curve exponent for step scaling (>1 biases toward fine late in optimization)
+    pub step_scale_curve: f32,
+
+    // Dynamic Alpha Schedule (Translucent → Opaque)
+    /// Enable dynamic alpha schedule (relaxes alpha constraints as fitness improves)
+    pub dynamic_alpha_enabled: bool,
+    /// Initial minimum alpha (e.g., 0.078 = 20/255)
+    pub alpha_min_start: f32,
+    /// Initial maximum alpha (e.g., 0.784 = 200/255)
+    pub alpha_max_start: f32,
+    /// Target minimum alpha (e.g., 0.02 = 5/255)
+    pub alpha_min_target: f32,
+    /// Target maximum alpha (e.g., 0.98 = 250/255)
+    pub alpha_max_target: f32,
+    /// Curve exponent for alpha schedule progression
+    pub alpha_schedule_curve: f32,
 }
 
 impl Default for AppSettings {
@@ -190,7 +226,7 @@ impl Default for AppSettings {
             polygon_antialiasing: true,
 
             // Autofocus defaults (matching Engine::new)
-            autofocus_enabled: true,
+            autofocus_enabled: false,
             autofocus_mode: AutofocusMode::BSPTree,
             autofocus_grid_size: 4,
             autofocus_max_depth: 4,            // 4 levels = up to 256 tiles for quadtree
@@ -213,7 +249,8 @@ impl Default for AppSettings {
             p_remove: 0.15,     // 15%
             p_reorder: 0.15,    // 15%
             p_move_point: 0.15, // 15%
-            // Remainder: 35% = no mutation
+            p_recolor: 0.15,    // 5% (new color-only mutation)
+            // Remainder: 20% = no mutation
 
             // Alpha range (20-200 in [0,255])
             alpha_min: 20.0 / 255.0,
@@ -227,7 +264,7 @@ impl Default for AppSettings {
             batch_size: 8,
 
             // Polygon shape (dynamic arity = original behavior)
-            polygon_arity_mode: PolygonArityMode::Dynamic,
+            polygon_arity_mode: PolygonArityMode::QuadOnly,
 
             // Geometry constraints (enabled by default for better stability)
             enforce_simple_convex: true,
@@ -237,7 +274,7 @@ impl Default for AppSettings {
             use_tiled_fitness: true,    // Enabled by default (minimal overhead, significant speedup)
 
             // Perceptual weighting (disabled by default - user opt-in)
-            perceptual_enabled: false,  // Off by default (user must enable)
+            perceptual_enabled: true,  // Off by default (user must enable)
             perceptual_k_q8: 48,        // Balanced default when enabled (≈0.1875 = 19% extra at white)
             perceptual_scale_by_alpha: false,  // Don't scale by alpha (premul already encodes coverage)
             perceptual_show_weight_map: false,  // Debug overlay off by default
@@ -245,9 +282,29 @@ impl Default for AppSettings {
             // Metrics & Termination
             metrics_settings: MetricsSettings::default(),
             termination_settings: TerminationSettings {
-                enable_target_psnr: true,       // Stop at target PSNR (35.0 dB)
+                enable_target_psnr: false,       // Stop at target PSNR (35.0 dB)
                 enable_sad_per_px_stop: true,   // Stop at SAD/px threshold (2.0)
             },
+
+            // Micro-Polish Pass (disabled by default)
+            micro_polish_enabled: true,          // Off by default (user opt-in)
+            micro_polish_interval: 1000,          // Every 1000 generations
+            micro_polish_vertex_step: 1.0,        // 1 pixel nudges
+            micro_polish_color_step: 1.0 / 255.0, // 1/255 color nudges
+
+            // Adaptive Step Sizes (disabled by default)
+            adaptive_steps_enabled: true,        // Off by default (user opt-in)
+            step_scale_min: 0.25,                 // Fine (25% of base step)
+            step_scale_max: 1.0,                  // Coarse (100% of base step)
+            step_scale_curve: 1.5,                // Curve exponent (biases toward fine late)
+
+            // Dynamic Alpha Schedule (disabled by default)
+            dynamic_alpha_enabled: true,         // Off by default (user opt-in)
+            alpha_min_start: 20.0 / 255.0,        // Start: 20/255 = 0.078
+            alpha_max_start: 200.0 / 255.0,       // Start: 200/255 = 0.784
+            alpha_min_target: 5.0 / 255.0,        // Target: 5/255 = 0.02
+            alpha_max_target: 250.0 / 255.0,      // Target: 250/255 = 0.98
+            alpha_schedule_curve: 1.5,            // Curve exponent (smooth transition)
         }
     }
 }
@@ -370,6 +427,7 @@ impl AppSettings {
             p_remove: self.p_remove,
             p_reorder: self.p_reorder,
             p_move_point: self.p_move_point,
+            p_recolor: self.p_recolor,
             pos_sigma: 10.0,  // Not exposed in UI (random mutations)
             color_step: self.color_step,
             pos_step: self.pos_step,
@@ -385,6 +443,20 @@ impl AppSettings {
             use_tiled_fitness: self.use_tiled_fitness,
             perceptual_k_q8: if self.perceptual_enabled { self.perceptual_k_q8 } else { 0 },
             perceptual_scale_by_alpha: self.perceptual_scale_by_alpha,
+            micro_polish_enabled: self.micro_polish_enabled,
+            micro_polish_interval: self.micro_polish_interval,
+            micro_polish_vertex_step: self.micro_polish_vertex_step,
+            micro_polish_color_step: self.micro_polish_color_step,
+            adaptive_steps_enabled: self.adaptive_steps_enabled,
+            step_scale_min: self.step_scale_min,
+            step_scale_max: self.step_scale_max,
+            step_scale_curve: self.step_scale_curve,
+            dynamic_alpha_enabled: self.dynamic_alpha_enabled,
+            alpha_min_start: self.alpha_min_start,
+            alpha_max_start: self.alpha_max_start,
+            alpha_min_target: self.alpha_min_target,
+            alpha_max_target: self.alpha_max_target,
+            alpha_schedule_curve: self.alpha_schedule_curve,
         }
     }
 }

@@ -107,6 +107,77 @@ pub fn load_target_image(
                             EngineCommand::TriggerAutofocus => {
                                 engine.update_autofocus();  // force immediate autofocus update
                             }
+                            EngineCommand::RecolorAll => {
+                                // Run global color refinement pass on all polygons
+                                // Uses a simplified callback that doesn't need genome info
+                                let update_tx_clone = update_tx.clone();
+                                let ctx_clone_inner = ctx_clone.clone();
+                                let baseline = engine.baseline_fitness;
+                                let current_generation = engine.generation;
+                                let img_width = engine.width;
+                                let img_height = engine.height;
+                                let psnr_peak = engine.metrics_settings.psnr_peak;
+                                let avg_weight = engine.avg_weight_q8;
+                                let perceptual_k = engine.perceptual_k_q8();
+
+                                let mut update_callback = |_genome: &crate::dna::Genome, rgba: &[u8], fitness_val: f64, _improved: bool| {
+                                    let fitness_percent = crate::engine::Engine::fitness_percent_from_baseline(
+                                        baseline,
+                                        fitness_val,
+                                    );
+
+                                    let sad = fitness_val;
+                                    let num_px = (img_width as usize) * (img_height as usize);
+                                    let metrics = if avg_weight.is_some() {
+                                        crate::fitness::MetricsSnapshot::from_sad_weighted_normalized(
+                                            sad,
+                                            num_px,
+                                            avg_weight,
+                                            psnr_peak as f32,
+                                        )
+                                    } else {
+                                        crate::fitness::MetricsSnapshot::from_sad(
+                                            sad,
+                                            num_px,
+                                            psnr_peak as f32,
+                                        )
+                                    };
+
+                                    let _ = update_tx_clone.send(EngineUpdate {
+                                        current_rgba: Arc::from(rgba),
+                                        generation: current_generation,
+                                        fitness: fitness_percent,
+                                        triangles: _genome.polys.len(),
+                                        autofocus_tiles: None,
+                                        focus_region: None,
+                                        focus_tile_indices: None,
+                                        metrics,
+                                        weighted_sad: avg_weight.map(|_| fitness_val),
+                                        perceptual_k,
+                                    });
+                                    ctx_clone_inner.request_repaint();
+                                };
+
+                                let improved_count = engine.recolor_all(&mut update_callback);
+
+                                // Send final update with improved count (could log or show notification)
+                                let _ = update_tx.send(EngineUpdate {
+                                    current_rgba: Arc::from(engine.current_rgba.as_slice()),
+                                    generation: engine.generation,
+                                    fitness: engine.fitness_percent_normalized(),
+                                    triangles: engine.genome.polys.len(),
+                                    autofocus_tiles: None,
+                                    focus_region: engine.focus_region,
+                                    focus_tile_indices: None,
+                                    metrics: engine.last_metrics,
+                                    weighted_sad: engine.avg_weight_q8.map(|_| engine.current_fitness),
+                                    perceptual_k: engine.perceptual_k_q8(),
+                                });
+                                ctx_clone.request_repaint();
+
+                                // Log result (visible in console)
+                                println!("Recolor All: improved {} / {} polygons", improved_count, engine.genome.polys.len());
+                            }
                         }
                     }
 

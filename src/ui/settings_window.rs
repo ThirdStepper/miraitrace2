@@ -54,8 +54,10 @@ pub fn show_settings_window(
             ui.add_space(10.0);
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                // display Settings
-                egui::CollapsingHeader::new(egui::RichText::new("🎨 Display").heading())
+                // ====================
+                // 1. DISPLAY & UI
+                // ====================
+                egui::CollapsingHeader::new(egui::RichText::new("🖥️ Display & UI").heading())
                     .default_open(true)
                     .show(ui, |ui| {
                         ui.label(egui::RichText::new("✓ Apply immediately")
@@ -83,9 +85,293 @@ pub fn show_settings_window(
 
                 ui.add_space(10.0);
 
-                // autofocus Settings
-                egui::CollapsingHeader::new(egui::RichText::new("🎯 Autofocus").heading())
+                // ====================
+                // 2. CORE EVOLUTION
+                // ====================
+                egui::CollapsingHeader::new(egui::RichText::new("🔧 Core Evolution").heading())
                     .default_open(true)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("⟳ Applies to new images")
+                            .color(egui::Color32::from_rgb(200, 150, 100))
+                            .small());
+                        ui.add_space(5.0);
+
+                        // Optimization Step Sizes
+                        ui.label(egui::RichText::new("Optimization Step Sizes").strong());
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Color Step Size:");
+                            ui.add(egui::Slider::new(&mut settings.color_step, 0.001..=0.05)
+                                .text("step"));
+                        });
+                        ui.label("  Step size for color optimization (default: 5/255 ≈ 0.0196)");
+                        ui.add_space(5.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Position Step Size:");
+                            ui.add(egui::Slider::new(&mut settings.pos_step, 1.0..=50.0)
+                                .text("pixels"));
+                        });
+                        ui.label("  Step size for vertex optimization (default: 15px)");
+                        ui.add_space(10.0);
+
+                        ui.separator();
+                        ui.label(egui::RichText::new("Mutation Probabilities").strong());
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Add Polygon:");
+                            ui.add(egui::Slider::new(&mut settings.p_add, 0.0..=1.0)
+                                .text("probability"));
+                        });
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Remove Polygon:");
+                            ui.add(egui::Slider::new(&mut settings.p_remove, 0.0..=1.0)
+                                .text("probability"));
+                        });
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Reorder Polygon:");
+                            ui.add(egui::Slider::new(&mut settings.p_reorder, 0.0..=1.0)
+                                .text("probability"));
+                        });
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Move Vertex:");
+                            ui.add(egui::Slider::new(&mut settings.p_move_point, 0.0..=1.0)
+                                .text("probability"));
+                        });
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Recolor Polygon (NEW):");
+                            ui.add(egui::Slider::new(&mut settings.p_recolor, 0.0..=1.0)
+                                .text("probability"));
+                        });
+                        ui.label("  Color-only mutation (no shape change)");
+                        ui.add_space(10.0);
+
+                        ui.separator();
+                        ui.label(egui::RichText::new("Parallel Evaluation").strong());
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Batch Size:");
+                            ui.add(egui::Slider::new(&mut settings.batch_size, 1..=32)
+                                .text("candidates")
+                                .logarithmic(true));
+                        });
+                        ui.label("  Number of mutations to evaluate in parallel per generation");
+                        ui.label("  • 1 = sequential, 8 = balanced (default), 16-32 = max exploration");
+                        ui.add_space(10.0);
+
+                        ui.separator();
+                        ui.label(egui::RichText::new("Polygon Limits").strong());
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Min Polygons:");
+                            ui.add(egui::Slider::new(&mut settings.min_tris, 1..=50_000)
+                                .text("polygons"));
+                        });
+                        ui.label("  (Original Evolve: 15,000)");
+                        ui.add_space(5.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Max Polygons:");
+                            ui.add(egui::Slider::new(&mut settings.max_tris, 1_000..=999_999)
+                                .text("polygons"));
+                        });
+                        ui.label("  (Original Evolve: 150,000)");
+                        ui.add_space(10.0);
+
+                        ui.separator();
+                        ui.label(egui::RichText::new("Alpha Range").strong());
+                        ui.add_space(3.0);
+
+                        // Show warning if dynamic alpha is enabled
+                        if settings.dynamic_alpha_enabled {
+                            ui.label(egui::RichText::new("⚠️ Dynamic Alpha Schedule is enabled - these values will be overridden")
+                                .color(egui::Color32::from_rgb(255, 180, 0)));
+                            ui.add_space(3.0);
+                        }
+
+                        ui.horizontal(|ui| {
+                            ui.label("Min Alpha:");
+                            ui.add_enabled(!settings.dynamic_alpha_enabled,
+                                egui::Slider::new(&mut settings.alpha_min, 0.0..=1.0)
+                                    .text("alpha"));
+                        });
+                        ui.add_space(5.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Max Alpha:");
+                            ui.add_enabled(!settings.dynamic_alpha_enabled,
+                                egui::Slider::new(&mut settings.alpha_max, 0.0..=1.0)
+                                    .text("alpha"));
+                        });
+                    });
+
+                ui.add_space(10.0);
+
+                // ====================
+                // 3. ADVANCED OPTIMIZATIONS (NEW)
+                // ====================
+                egui::CollapsingHeader::new(egui::RichText::new("🚀 Advanced Optimizations").heading())
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("⟳ Applies to new images")
+                            .color(egui::Color32::from_rgb(200, 150, 100))
+                            .small());
+                        ui.label("CPU-only optimization features for improved convergence");
+                        ui.add_space(8.0);
+
+                        // ---- ADAPTIVE STEP SIZES ----
+                        ui.label(egui::RichText::new("Adaptive Step Sizes (Coarse → Fine)").strong());
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut settings.adaptive_steps_enabled, "Enable Adaptive Step Sizes");
+                        });
+                        ui.label("  Gradually reduce step sizes as fitness improves");
+                        ui.label("  • Early: large steps (fast exploration)");
+                        ui.label("  • Late: small steps (fine-tuning precision)");
+                        ui.add_space(5.0);
+
+                        ui.add_enabled_ui(settings.adaptive_steps_enabled, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("  Minimum Scale (Fine):");
+                                ui.add(egui::Slider::new(&mut settings.step_scale_min, 0.1..=1.0)
+                                    .text("× base step"));
+                            });
+                            ui.label("    Smallest step size (at convergence)");
+                            ui.add_space(3.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label("  Maximum Scale (Coarse):");
+                                ui.add(egui::Slider::new(&mut settings.step_scale_max, 0.5..=2.0)
+                                    .text("× base step"));
+                            });
+                            ui.label("    Largest step size (at start)");
+                            ui.add_space(3.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label("  Curve Exponent:");
+                                ui.add(egui::Slider::new(&mut settings.step_scale_curve, 1.0..=3.0)
+                                    .text("power"));
+                            });
+                            ui.label("    >1 biases toward fine steps late in optimization");
+                            ui.label("    Formula: scale = min + (max - min) × (1 - progress^curve)");
+                        });
+
+                        ui.add_space(12.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        // ---- DYNAMIC ALPHA SCHEDULE ----
+                        ui.label(egui::RichText::new("Dynamic Alpha Schedule (Translucent → Opaque)").strong());
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut settings.dynamic_alpha_enabled, "Enable Dynamic Alpha Schedule");
+                        });
+                        ui.label("  Gradually relax alpha constraints as fitness improves");
+                        ui.label("  • Early: translucent (broad color washes)");
+                        ui.label("  • Late: more opaque allowed (precise color matching)");
+                        if settings.dynamic_alpha_enabled {
+                            ui.label(egui::RichText::new("  ⚠️ Overrides manual alpha_min/alpha_max in Core Evolution")
+                                .color(egui::Color32::from_rgb(255, 180, 0)));
+                        }
+                        ui.add_space(5.0);
+
+                        ui.add_enabled_ui(settings.dynamic_alpha_enabled, |ui| {
+                            ui.label("  Starting Alpha Range:");
+                            ui.horizontal(|ui| {
+                                ui.label("    Min:");
+                                ui.add(egui::Slider::new(&mut settings.alpha_min_start, 0.0..=0.2)
+                                    .text("alpha"));
+                                ui.label("  Max:");
+                                ui.add(egui::Slider::new(&mut settings.alpha_max_start, 0.5..=1.0)
+                                    .text("alpha"));
+                            });
+                            ui.label("    Default: 20/255 - 200/255 (0.078 - 0.784)");
+                            ui.add_space(5.0);
+
+                            ui.label("  Target Alpha Range:");
+                            ui.horizontal(|ui| {
+                                ui.label("    Min:");
+                                ui.add(egui::Slider::new(&mut settings.alpha_min_target, 0.0..=0.1)
+                                    .text("alpha"));
+                                ui.label("  Max:");
+                                ui.add(egui::Slider::new(&mut settings.alpha_max_target, 0.8..=1.0)
+                                    .text("alpha"));
+                            });
+                            ui.label("    Default: 5/255 - 250/255 (0.02 - 0.98)");
+                            ui.add_space(5.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label("  Curve Exponent:");
+                                ui.add(egui::Slider::new(&mut settings.alpha_schedule_curve, 1.0..=3.0)
+                                    .text("power"));
+                            });
+                            ui.label("    >1 biases toward target late in optimization");
+                        });
+
+                        ui.add_space(12.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        // ---- PERIODIC MICRO-POLISH ----
+                        ui.label(egui::RichText::new("Periodic Micro-Polish Pass").strong());
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut settings.micro_polish_enabled, "Enable Periodic Micro-Polish");
+                        });
+                        ui.label("  Periodically attempts tiny refinements on all polygons");
+                        ui.label("  • Reduces cumulative drift from many mutations");
+                        ui.label("  • Uses very small step sizes (1px vertex, 1/255 color)");
+                        ui.add_space(5.0);
+
+                        ui.add_enabled_ui(settings.micro_polish_enabled, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("  Interval:");
+                                ui.add(egui::Slider::new(&mut settings.micro_polish_interval, 100..=5000)
+                                    .text("generations")
+                                    .logarithmic(true));
+                            });
+                            ui.label("    How often to run micro-polish pass (default: 1000)");
+                            ui.add_space(5.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label("  Vertex Step:");
+                                ui.add(egui::Slider::new(&mut settings.micro_polish_vertex_step, 0.1..=5.0)
+                                    .text("pixels"));
+                            });
+                            ui.label("    Tiny vertex nudge size (default: 1.0px)");
+                            ui.add_space(5.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label("  Color Step:");
+                                ui.add(egui::Slider::new(&mut settings.micro_polish_color_step, 0.0001..=0.01)
+                                    .text("step"));
+                            });
+                            ui.label("    Tiny color nudge size (default: 1/255 ≈ 0.004)");
+                        });
+                    });
+
+                ui.add_space(10.0);
+
+                // ====================
+                // 4. AUTOFOCUS (moved down)
+                // ====================
+                egui::CollapsingHeader::new(egui::RichText::new("🎯 Autofocus").heading())
+                    .default_open(false)
                     .show(ui, |ui| {
                         ui.label(egui::RichText::new("✓ Apply immediately")
                             .color(egui::Color32::from_rgb(100, 200, 100))
@@ -116,7 +402,6 @@ pub fn show_settings_window(
                         use crate::settings::AutofocusMode;
                         match settings.autofocus_mode {
                             AutofocusMode::UniformGrid => {
-                                // Grid Size (2-16, step 1)
                                 ui.horizontal(|ui| {
                                     ui.label("Grid Size:");
                                     ui.add_enabled(!settings.autofocus_progressive,
@@ -131,7 +416,6 @@ pub fn show_settings_window(
                                 }
                             }
                             AutofocusMode::Quadtree => {
-                                // max Depth
                                 ui.horizontal(|ui| {
                                     ui.label("Max Depth:");
                                     ui.add_enabled(!settings.autofocus_progressive,
@@ -146,7 +430,6 @@ pub fn show_settings_window(
                                 }
                                 ui.add_space(3.0);
 
-                                // error Threshold
                                 ui.horizontal(|ui| {
                                     ui.label("Error Threshold:");
                                     if settings.autofocus_error_threshold == 0.0 {
@@ -161,7 +444,6 @@ pub fn show_settings_window(
                                 ui.label("  ⚙️ Auto = adaptive (fitness-scaled). 0-85%: 0.5× stddev, 95-100%: 0.3×");
                             }
                             AutofocusMode::BSPTree => {
-                                // Max Tiles (uses grid_size field)
                                 ui.horizontal(|ui| {
                                     ui.label("Max Tiles:");
                                     ui.add_enabled(!settings.autofocus_progressive,
@@ -177,7 +459,6 @@ pub fn show_settings_window(
                                 }
                                 ui.add_space(3.0);
 
-                                // error Threshold
                                 ui.horizontal(|ui| {
                                     ui.label("Error Threshold:");
                                     if settings.autofocus_error_threshold == 0.0 {
@@ -192,7 +473,6 @@ pub fn show_settings_window(
                                 ui.label("  ⚙️ Auto = max-based (fitness-scaled). Subdivides high-error regions aggressively.");
                                 ui.label("     0-70%: stop at 75% of max error, 85-90%: 50%, 95-100%: 30% (maximum detail)");
 
-                                // manual threshold slider (only shown when not auto)
                                 if settings.autofocus_error_threshold > 0.0 {
                                     ui.add_space(3.0);
                                     ui.horizontal(|ui| {
@@ -207,7 +487,6 @@ pub fn show_settings_window(
                         }
                         ui.add_space(5.0);
 
-                        // re-evaluation Interval
                         ui.horizontal(|ui| {
                             ui.label("Re-evaluation Interval:");
                             ui.add(egui::Slider::new(&mut settings.autofocus_interval, 50..=500)
@@ -221,7 +500,6 @@ pub fn show_settings_window(
                         ui.label(egui::RichText::new("Advanced").strong());
                         ui.add_space(5.0);
 
-                        // multi-tile focus
                         ui.horizontal(|ui| {
                             ui.label("Multi-tile Focus:");
                             ui.add(egui::Slider::new(&mut settings.autofocus_multi_tile_count, 1..=4)
@@ -230,7 +508,6 @@ pub fn show_settings_window(
                         ui.label("  Focus on top K worst tiles (1=single, 2+=merged region)");
                         ui.add_space(5.0);
 
-                        // probabilistic selection
                         ui.horizontal(|ui| {
                             ui.label("Selection Strategy:");
                             ui.radio_value(&mut settings.autofocus_probabilistic, false, "Worst-first (exploit)");
@@ -239,7 +516,6 @@ pub fn show_settings_window(
                         ui.label("  Worst-first: always pick worst tile. Probabilistic: weight by error.");
                         ui.add_space(5.0);
 
-                        // progressive refinement
                         ui.horizontal(|ui| {
                             ui.label("Progressive Refinement:");
                             ui.checkbox(&mut settings.autofocus_progressive, "");
@@ -249,7 +525,9 @@ pub fn show_settings_window(
 
                 ui.add_space(10.0);
 
-                // polygon Shape
+                // ====================
+                // 5. POLYGON SHAPE
+                // ====================
                 egui::CollapsingHeader::new(egui::RichText::new("🔺 Polygon Shape").heading())
                     .default_open(false)
                     .show(ui, |ui| {
@@ -258,7 +536,6 @@ pub fn show_settings_window(
                             .small());
                         ui.add_space(5.0);
 
-                        // polygon Arity Mode
                         ui.horizontal(|ui| {
                             ui.label("Polygon Vertex Count:");
                             egui::ComboBox::from_id_salt("polygon_arity_mode")
@@ -288,7 +565,6 @@ pub fn show_settings_window(
                         ui.add_space(10.0);
                         ui.separator();
 
-                        // enforce Simple Convex
                         ui.horizontal(|ui| {
                             ui.label("Prevent twisted/self-intersecting polygons:");
                             ui.checkbox(&mut settings.enforce_simple_convex, "");
@@ -301,7 +577,9 @@ pub fn show_settings_window(
 
                 ui.add_space(10.0);
 
-                // ⚡ fast fitness evaluation
+                // ====================
+                // 6. FAST FITNESS
+                // ====================
                 egui::CollapsingHeader::new(egui::RichText::new("⚡ Fast Fitness").heading())
                     .default_open(false)
                     .show(ui, |ui| {
@@ -310,7 +588,6 @@ pub fn show_settings_window(
                             .small());
                         ui.add_space(5.0);
 
-                        // pyramid fitness
                         ui.horizontal(|ui| {
                             ui.label("Pyramid Fitness (Coarse-to-Fine):");
                             ui.checkbox(&mut settings.use_pyramid_fitness, "");
@@ -320,7 +597,6 @@ pub fn show_settings_window(
                         ui.label("  • Minimal quality impact");
                         ui.add_space(5.0);
 
-                        // tiled fitness
                         ui.horizontal(|ui| {
                             ui.label("Tiled Fitness (Incremental Cache):");
                             ui.checkbox(&mut settings.use_tiled_fitness, "");
@@ -334,7 +610,9 @@ pub fn show_settings_window(
 
                 ui.add_space(10.0);
 
-                // Perceptual Weighting
+                // ====================
+                // 7. PERCEPTUAL WEIGHTING
+                // ====================
                 egui::CollapsingHeader::new(egui::RichText::new("🎨 Perceptual Weighting").heading())
                     .default_open(false)
                     .show(ui, |ui| {
@@ -347,7 +625,6 @@ pub fn show_settings_window(
                         ui.label("Fixes sRGB undercounting: errors in highlights weighted more heavily.");
                         ui.add_space(8.0);
 
-                        // Enable toggle
                         ui.horizontal(|ui| {
                             ui.label("Enable Perceptual Weighting:");
                             ui.checkbox(&mut settings.perceptual_enabled, "");
@@ -355,12 +632,10 @@ pub fn show_settings_window(
                         ui.label("  Apply luminance-based weights to fitness calculation");
                         ui.add_space(8.0);
 
-                        // Only show controls when enabled
                         ui.add_enabled_ui(settings.perceptual_enabled, |ui| {
                             ui.label(egui::RichText::new("Strength Presets:").strong());
                             ui.add_space(3.0);
 
-                            // Preset buttons (horizontal row)
                             ui.horizontal(|ui| {
                                 if ui.button("Off (0)").on_hover_text("Disable weighting").clicked() {
                                     settings.perceptual_k_q8 = 0;
@@ -378,7 +653,6 @@ pub fn show_settings_window(
                             });
                             ui.add_space(5.0);
 
-                            // Custom slider
                             ui.horizontal(|ui| {
                                 ui.label("Custom k value:");
                                 let mut k_int = settings.perceptual_k_q8 as i32;
@@ -389,7 +663,6 @@ pub fn show_settings_window(
                             ui.label("  Q8.8 fixed-point (256 = 1.0)");
                             ui.add_space(5.0);
 
-                            // Help text
                             ui.label(egui::RichText::new("💡 How it works:").strong());
                             ui.label("  • Higher values = brighter regions weighted more");
                             ui.label("  • k=48 (default) adds ~19% extra weight at pure white");
@@ -397,7 +670,6 @@ pub fn show_settings_window(
                             ui.label("  • No gamma conversion - uses BT.709 luma approximation");
                             ui.add_space(8.0);
 
-                            // Advanced: alpha scaling toggle
                             ui.horizontal(|ui| {
                                 ui.label("Scale weight by alpha (advanced):");
                                 ui.checkbox(&mut settings.perceptual_scale_by_alpha, "");
@@ -407,7 +679,6 @@ pub fn show_settings_window(
                             ui.label("  • Enable to de-emphasize translucent highlights");
                             ui.add_space(8.0);
 
-                            // Debug: weight map visualization
                             ui.horizontal(|ui| {
                                 ui.label("Show weight map overlay (debug):");
                                 ui.checkbox(&mut settings.perceptual_show_weight_map, "");
@@ -420,131 +691,9 @@ pub fn show_settings_window(
 
                 ui.add_space(10.0);
 
-                // evolution parameters
-                egui::CollapsingHeader::new(egui::RichText::new("⚙️ Evolution Parameters").heading())
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new("⟳ Applies to new images")
-                            .color(egui::Color32::from_rgb(200, 150, 100))
-                            .small());
-                        ui.add_space(5.0);
-
-                        // color step
-                        ui.horizontal(|ui| {
-                            ui.label("Color Step Size:");
-                            ui.add(egui::Slider::new(&mut settings.color_step, 0.001..=0.05)
-                                .text("step"));
-                        });
-                        ui.label("  Step size for color optimization (default: 5/255 ≈ 0.0196)");
-                        ui.add_space(5.0);
-
-                        // position step
-                        ui.horizontal(|ui| {
-                            ui.label("Position Step Size:");
-                            ui.add(egui::Slider::new(&mut settings.pos_step, 1.0..=50.0)
-                                .text("pixels"));
-                        });
-                        ui.label("  Step size for vertex optimization (default: 15px)");
-                        ui.add_space(5.0);
-
-                        ui.separator();
-                        ui.label(egui::RichText::new("Mutation Probabilities").strong());
-                        ui.add_space(5.0);
-
-                        // mutation probabilities
-                        ui.horizontal(|ui| {
-                            ui.label("Add Triangle:");
-                            ui.add(egui::Slider::new(&mut settings.p_add, 0.0..=1.0)
-                                .text("probability"));
-                        });
-                        ui.add_space(5.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label("Remove Triangle:");
-                            ui.add(egui::Slider::new(&mut settings.p_remove, 0.0..=1.0)
-                                .text("probability"));
-                        });
-                        ui.add_space(5.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label("Reorder Triangle:");
-                            ui.add(egui::Slider::new(&mut settings.p_reorder, 0.0..=1.0)
-                                .text("probability"));
-                        });
-                        ui.add_space(5.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label("Move Point:");
-                            ui.add(egui::Slider::new(&mut settings.p_move_point, 0.0..=1.0)
-                                .text("probability"));
-                        });
-                        ui.add_space(5.0);
-
-                        ui.separator();
-                        ui.label(egui::RichText::new("Parallel Evaluation").strong());
-                        ui.add_space(5.0);
-
-                        // batch Size
-                        ui.horizontal(|ui| {
-                            ui.label("Batch Size:");
-                            ui.add(egui::Slider::new(&mut settings.batch_size, 1..=32)
-                                .text("candidates")
-                                .logarithmic(true));
-                        });
-                        ui.label("  Number of mutations to evaluate in parallel per generation");
-                        ui.label("  • 1 = sequential (original behavior)");
-                        ui.label("  • 8 = balanced (default, good parallelism)");
-                        ui.label("  • 16-32 = maximum exploration (more CPU usage)");
-                    });
-
-                ui.add_space(10.0);
-
-                // constraints
-                egui::CollapsingHeader::new(egui::RichText::new("📊 Constraints").heading())
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new("⟳ Applies to new images")
-                            .color(egui::Color32::from_rgb(200, 150, 100))
-                            .small());
-                        ui.add_space(5.0);
-
-                        // polygon limits
-                        ui.horizontal(|ui| {
-                            ui.label("Min Triangles:");
-                            ui.add(egui::Slider::new(&mut settings.min_tris, 1..=50_000)
-                                .text("triangles"));
-                        });
-                        ui.label("  (Original Evolve: 15,000)");
-                        ui.add_space(5.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label("Max Triangles:");
-                            ui.add(egui::Slider::new(&mut settings.max_tris, 1_000..=999_999)
-                                .text("triangles"));
-                        });
-                        ui.label("  (Original Evolve: 150,000)");
-                        ui.add_space(5.0);
-
-                        ui.separator();
-                        ui.label(egui::RichText::new("Alpha Range").strong());
-                        ui.add_space(5.0);
-
-                        // alpha range
-                        ui.horizontal(|ui| {
-                            ui.label("Min Alpha:");
-                            ui.add(egui::Slider::new(&mut settings.alpha_min, 0.0..=1.0)
-                                .text("alpha"));
-                        });
-                        ui.add_space(5.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label("Max Alpha:");
-                            ui.add(egui::Slider::new(&mut settings.alpha_max, 0.0..=1.0)
-                                .text("alpha"));
-                        });
-                    });
-
-                // 📈 Metrics & Termination
+                // ====================
+                // 8. METRICS & TERMINATION
+                // ====================
                 egui::CollapsingHeader::new(egui::RichText::new("📈 Metrics & Termination").heading())
                     .default_open(false)
                     .show(ui, |ui| {
@@ -553,7 +702,6 @@ pub fn show_settings_window(
                             .small());
                         ui.add_space(5.0);
 
-                        // metrics mode selection
                         ui.horizontal(|ui| {
                             ui.label("Display Mode:");
                             ui.radio_value(&mut settings.metrics_settings.mode,
@@ -568,7 +716,6 @@ pub fn show_settings_window(
                         ui.label(egui::RichText::new("Termination Conditions").strong());
                         ui.add_space(5.0);
 
-                        // PSNR target
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut settings.termination_settings.enable_target_psnr, "Stop at PSNR:");
                             ui.add(egui::Slider::new(&mut settings.metrics_settings.target_psnr, 20.0..=50.0)
@@ -577,7 +724,6 @@ pub fn show_settings_window(
                         ui.label("  30 dB = acceptable, 35 dB = good, 40+ dB = very good");
                         ui.add_space(5.0);
 
-                        // SAD per pixel threshold
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut settings.termination_settings.enable_sad_per_px_stop, "Stop at SAD/px:");
                             ui.add(egui::Slider::new(&mut settings.metrics_settings.sad_per_px_stop, 0.1..=10.0));
@@ -589,7 +735,6 @@ pub fn show_settings_window(
                         ui.label(egui::RichText::new("Advanced").strong());
                         ui.add_space(5.0);
 
-                        // PSNR peak value
                         ui.horizontal(|ui| {
                             ui.label("PSNR Peak Value:");
                             ui.add(egui::Slider::new(&mut settings.metrics_settings.psnr_peak, 1.0..=255.0));
@@ -597,7 +742,9 @@ pub fn show_settings_window(
                         ui.label("  255.0 for 8-bit images, 1.0 for normalized [0,1]");
                     });
 
-                // keyboard shortcuts reference
+                // ====================
+                // 9. KEYBOARD SHORTCUTS
+                // ====================
                 ui.add_space(15.0);
                 ui.separator();
 
@@ -610,7 +757,6 @@ pub fn show_settings_window(
                     ui.set_max_width(420.0);
 
                     ui.columns(2, |cols| {
-                        // left column - general shortcuts
                         cols[0].vertical(|ui| {
                             ui.label(egui::RichText::new("General").underline());
                             ui.add_space(3.0);
@@ -632,7 +778,6 @@ pub fn show_settings_window(
                             });
                         });
 
-                        // right column - autofocus shortcuts
                         cols[1].vertical(|ui| {
                             ui.label(egui::RichText::new("Autofocus").underline());
                             ui.add_space(3.0);

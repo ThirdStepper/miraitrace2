@@ -5,7 +5,8 @@ pub struct MutateConfig {
     pub p_remove: f32,     // chance to remove a triangle (15% in original)
     pub p_reorder: f32,    // chance to reorder z-index (15% in original)
     pub p_move_point: f32, // chance to move a vertex (15% in original)
-    // remainder (35%) = no mutation, just evaluate current state
+    pub p_recolor: f32,    // chance to recolor a polygon (new: color-only mutation)
+    // remainder = no mutation, just evaluate current state
 
     // mutation parameters (kept for potential future use)
     pub pos_sigma: f32,   // pixel jitter for vertices
@@ -39,6 +40,26 @@ pub struct MutateConfig {
     // perceptual weighting (luminance-based emphasis for bright regions)
     pub perceptual_k_q8: u16,  // Q8.8 fixed-point weight parameter (0=off, 48≈balanced, 32-96 typical)
     pub perceptual_scale_by_alpha: bool,  // If true, multiply weight by (alpha/255). Default: false (premul RGB already encodes coverage)
+
+    // periodic micro-polish pass (global refinement with tiny steps)
+    pub micro_polish_enabled: bool,     // Enable periodic micro-polish pass
+    pub micro_polish_interval: u64,     // Run micro-polish every N generations
+    pub micro_polish_vertex_step: f32,  // Vertex step size (e.g., 1.0 px)
+    pub micro_polish_color_step: f32,   // Color step size (e.g., 1/255)
+
+    // adaptive step sizes (coarse → fine over time)
+    pub adaptive_steps_enabled: bool,   // Enable adaptive step size scaling
+    pub step_scale_min: f32,            // Minimum step scale (fine, e.g., 0.25)
+    pub step_scale_max: f32,            // Maximum step scale (coarse, e.g., 1.0)
+    pub step_scale_curve: f32,          // Curve exponent (>1 biases toward fine late)
+
+    // dynamic alpha schedule (translucent → opaque over time)
+    pub dynamic_alpha_enabled: bool,    // Enable dynamic alpha schedule
+    pub alpha_min_start: f32,           // Initial minimum alpha (e.g., 0.078)
+    pub alpha_max_start: f32,           // Initial maximum alpha (e.g., 0.784)
+    pub alpha_min_target: f32,          // Target minimum alpha (e.g., 0.02)
+    pub alpha_max_target: f32,          // Target maximum alpha (e.g., 0.98)
+    pub alpha_schedule_curve: f32,      // Curve exponent for alpha progression
 }
 
 impl Default for MutateConfig {
@@ -49,7 +70,8 @@ impl Default for MutateConfig {
             p_remove: 0.15,     // POLYS_REMOVE_RATE = 15%
             p_reorder: 0.15,    // POLYS_REORDER_RATE = 15%
             p_move_point: 0.15, // POINT_MOVE_RATE = 15%
-            // remainder: 35% = no mutation
+            p_recolor: 0.05,    // New color-only mutation (5%)
+            // remainder: 30% = no mutation
 
             // mutation parameters (match original Evolve)
             pos_sigma: 10.0,     // ±10 pixels for random mutations
@@ -83,6 +105,26 @@ impl Default for MutateConfig {
             // perceptual weighting (disabled by default - user opt-in)
             perceptual_k_q8: 0,  // 0 = off (no perceptual weighting)
             perceptual_scale_by_alpha: false,  // Don't scale by alpha (premul already encodes coverage)
+
+            // micro-polish pass (disabled by default)
+            micro_polish_enabled: false,          // Off by default (user opt-in)
+            micro_polish_interval: 1000,          // Every 1000 generations
+            micro_polish_vertex_step: 1.0,        // 1 pixel nudges
+            micro_polish_color_step: 1.0 / 255.0, // 1/255 color nudges
+
+            // adaptive step sizes (disabled by default)
+            adaptive_steps_enabled: false,        // Off by default (user opt-in)
+            step_scale_min: 0.25,                 // Fine (25% of base step)
+            step_scale_max: 1.0,                  // Coarse (100% of base step)
+            step_scale_curve: 1.5,                // Curve exponent (biases toward fine late)
+
+            // dynamic alpha schedule (disabled by default)
+            dynamic_alpha_enabled: false,         // Off by default (user opt-in)
+            alpha_min_start: 20.0 / 255.0,        // Start: 20/255 = 0.078
+            alpha_max_start: 200.0 / 255.0,       // Start: 200/255 = 0.784
+            alpha_min_target: 5.0 / 255.0,        // Target: 5/255 = 0.02
+            alpha_max_target: 250.0 / 255.0,      // Target: 250/255 = 0.98
+            alpha_schedule_curve: 1.5,            // Curve exponent (smooth transition)
         }
     }
 }

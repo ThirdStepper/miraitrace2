@@ -69,6 +69,7 @@ pub enum EngineCommand {
     SetFocusRegion(Option<FocusRegion>),
     UpdateAutofocusSettings(crate::settings::AutofocusPack),
     TriggerAutofocus, // force immediate autofocus update
+    RecolorAll,       // re-optimize colors on all polygons (global refinement pass)
 }
 
 // messages from engine thread to UI

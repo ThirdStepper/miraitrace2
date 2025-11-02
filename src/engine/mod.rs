@@ -267,6 +267,63 @@ impl Engine {
         self.update_metrics_snapshot();
     }
 
+    /// Compute adaptive step scale factor based on fitness progress.
+    /// Returns a value in [step_scale_min, step_scale_max] that decreases as fitness improves.
+    /// Early: large steps (coarse), Late: small steps (fine).
+    #[inline]
+    pub(self) fn step_scale(&self) -> f32 {
+        if !self.cfg.adaptive_steps_enabled {
+            return 1.0;  // No scaling when disabled
+        }
+
+        // Compute progress: 0.0 = no improvement, 1.0 = perfect (fitness=0)
+        // Use baseline as reference point
+        let progress = if self.baseline_fitness > 0.0 {
+            let normalized_error = (self.current_fitness / self.baseline_fitness) as f32;
+            (1.0 - normalized_error.min(1.0)).max(0.0)
+        } else {
+            0.0  // Edge case: avoid division by zero
+        };
+
+        // Apply curve: progress^k (k>1 biases toward fine late)
+        let t = progress.powf(self.cfg.step_scale_curve);
+
+        // Map to [fine, coarse] → larger scale at start, smaller at end
+        let fine = self.cfg.step_scale_min;
+        let coarse = self.cfg.step_scale_max;
+        fine + (coarse - fine) * (1.0 - t)
+    }
+
+    /// Update alpha constraints based on fitness progress (dynamic alpha schedule).
+    /// Gradually relaxes alpha_min/alpha_max as fitness improves.
+    /// This allows more opaque polygons later in optimization for precise color matching.
+    pub(self) fn update_alpha_schedule(&mut self) {
+        if !self.cfg.dynamic_alpha_enabled {
+            return;  // No updates when disabled
+        }
+
+        // Compute progress: 0.0 = no improvement, 1.0 = perfect (fitness=0)
+        let progress = if self.baseline_fitness > 0.0 {
+            let normalized_error = (self.current_fitness / self.baseline_fitness) as f32;
+            (1.0 - normalized_error.min(1.0)).max(0.0)
+        } else {
+            0.0  // Edge case: avoid division by zero
+        };
+
+        // Apply curve: progress^k (k>1 biases toward target late)
+        let t = progress.powf(self.cfg.alpha_schedule_curve);
+
+        // Interpolate from start → target
+        let alpha_min_new = self.cfg.alpha_min_start +
+            (self.cfg.alpha_min_target - self.cfg.alpha_min_start) * t;
+        let alpha_max_new = self.cfg.alpha_max_start +
+            (self.cfg.alpha_max_target - self.cfg.alpha_max_start) * t;
+
+        // Update constraints (these are used by all mutations and optimizations)
+        self.cfg.alpha_min = alpha_min_new;
+        self.cfg.alpha_max = alpha_max_new;
+    }
+
     /// Compute full-image fitness, routing to weighted SAD if perceptual weights are enabled.
     /// This is the unified fitness function used throughout the engine.
     #[inline]
@@ -358,12 +415,29 @@ impl Engine {
         // This is lightweight (just checks fitness and updates parameters if needed)
         if self.generation % self.gui_update_rate as u64 == 0 {
             self.update_progressive_params();
+            // Also update alpha schedule if enabled (runs frequently for smooth transitions)
+            self.update_alpha_schedule();
         }
 
         // Autofocus: periodically re-evaluate which region has highest error (matching Evolve)
         // This adaptively concentrates evolution effort where it's needed most
         if self.autofocus_enabled && self.generation % self.autofocus_interval == 0 {
             self.update_autofocus();
+        }
+
+        // Micro-polish: periodically run very small refinement steps on all polygons
+        // This helps reduce cumulative drift from many mutations
+        if self.cfg.micro_polish_enabled && self.generation > 0 && self.generation % self.cfg.micro_polish_interval == 0 {
+            let improved_count = self.micro_polish_pass(
+                self.cfg.micro_polish_vertex_step,
+                self.cfg.micro_polish_color_step,
+                update_callback,
+            );
+            // Log result (visible in console for debugging)
+            if improved_count > 0 {
+                println!("Micro-polish (gen {}): improved {} / {} polygons",
+                    self.generation, improved_count, self.genome.polys.len());
+            }
         }
 
         // Build-up phase: always add if below minimum (matching widget.cpp:307-314)
@@ -422,6 +496,12 @@ impl Engine {
 
             if self.rng.random::<f32>() < self.cfg.p_move_point {
                 if let Some((rgba, fit, dirty)) = self.move_point(&mut candidate, update_callback) {
+                    out_from_opt = Some((rgba, fit, dirty));
+                }
+            }
+
+            if self.rng.random::<f32>() < self.cfg.p_recolor {
+                if let Some((rgba, fit, dirty)) = self.recolor_poly(&mut candidate, update_callback) {
                     out_from_opt = Some((rgba, fit, dirty));
                 }
             }
