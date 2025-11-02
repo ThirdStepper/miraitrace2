@@ -52,6 +52,9 @@ impl ImprovementThrottle {
 pub struct Engine {
     pub(self) rng: Pcg32,
     pub(self) cfg: MutateConfig,
+    // Publicly accessible micro-polish settings (needed by engine_thread)
+    pub micro_polish_vertex_step: f32,
+    pub micro_polish_color_step: f32,
     pub genome: Genome,
     pub current_rgba: Vec<u8>, // premultiplied RGBA (tiny-skia's native format) - unpremul lazily for UI
     pub current_fitness: f64,  // SAD fitness (lower is better)
@@ -203,12 +206,16 @@ impl Engine {
             None
         };
 
-        // Save max_vertices before cfg is moved
+        // Save values from cfg before it's moved
         let initial_poly_points = cfg.max_vertices;
+        let micro_polish_vertex_step = cfg.micro_polish_vertex_step;
+        let micro_polish_color_step = cfg.micro_polish_color_step;
 
         let mut this = Self {
             rng,
             cfg,
+            micro_polish_vertex_step,
+            micro_polish_color_step,
             genome,
             current_rgba,
             current_fitness,
@@ -454,10 +461,12 @@ impl Engine {
         // Micro-polish: periodically run very small refinement steps on all polygons
         // This helps reduce cumulative drift from many mutations
         if self.cfg.micro_polish_enabled && self.generation > 0 && self.generation % self.cfg.micro_polish_interval == 0 {
+            let mut noop_progress = |_current: usize, _total: usize| {};
             let improved_count = self.micro_polish_pass(
                 self.cfg.micro_polish_vertex_step,
                 self.cfg.micro_polish_color_step,
                 update_callback,
+                &mut noop_progress,
             );
             // Log result (visible in console for debugging)
             if improved_count > 0 {

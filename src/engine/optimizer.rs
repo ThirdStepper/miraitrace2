@@ -258,12 +258,15 @@ impl Engine {
     /// This is a global refinement pass to reduce color drift after many mutations.
     /// Returns the number of polygons that produced an improvement.
     /// The update_callback is called during optimization to send incremental UI updates.
-    pub fn recolor_all<F>(
+    /// The progress_callback is called after each polygon to report progress.
+    pub fn recolor_all<F, P>(
         &mut self,
         update_callback: &mut F,
+        progress_callback: &mut P,
     ) -> usize
     where
         F: FnMut(&Genome, &[u8], f64, bool),
+        P: FnMut(usize, usize),
     {
         profiling::scope!("recolor_all");
         let mut improved = 0usize;
@@ -292,6 +295,9 @@ impl Engine {
                 improved += 1;
             }
             // If no improvement, optimization is automatically rejected (no state change)
+
+            // Report progress after each polygon
+            progress_callback(idx + 1, total_polys);
         }
 
         improved
@@ -301,14 +307,17 @@ impl Engine {
     /// This is a refinement pass that attempts tiny improvements (1px vertex, 1/255 color).
     /// Only accepts changes that produce strict fitness improvement.
     /// Returns the number of polygons that improved.
-    pub fn micro_polish_pass<F>(
+    /// The progress_callback is called after each polygon to report progress.
+    pub fn micro_polish_pass<F, P>(
         &mut self,
         vertex_step: f32,
         color_step: f32,
         _update_callback: &mut F,
+        progress_callback: &mut P,
     ) -> usize
     where
         F: FnMut(&Genome, &[u8], f64, bool),
+        P: FnMut(usize, usize),
     {
         profiling::scope!("micro_polish_pass");
         let mut improved = 0usize;
@@ -400,6 +409,9 @@ impl Engine {
                 self.update_current(current_render_premul, current_fitness);
                 improved += 1;
             }
+
+            // Report progress after each polygon
+            progress_callback(idx + 1, total_polys);
         }
 
         // Opt #9: Tiny-polygon cleanup phase (combine with micro-polish)

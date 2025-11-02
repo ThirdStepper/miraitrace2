@@ -333,7 +333,7 @@ impl Default for AppSettings {
             },
 
             // Micro-Polish Pass (disabled by default)
-            micro_polish_enabled: true,          // Off by default (user opt-in)
+            micro_polish_enabled: false,         // Off by default (user opt-in or use Optimize button)
             micro_polish_interval: 1000,          // Every 1000 generations
             micro_polish_vertex_step: 1.0,        // 1 pixel nudges
             micro_polish_color_step: 1.0 / 255.0, // 1/255 color nudges

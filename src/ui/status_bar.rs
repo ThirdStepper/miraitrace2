@@ -16,6 +16,7 @@ pub fn render_status_bar(
     autofocus_tiles: &Option<Vec<(usize, f64, FocusRegion)>>,
     autofocus_active_indices: &Option<Vec<usize>>,
     target_dims: [usize; 2],
+    optimization_progress: &Option<crate::app_types::OptimizationProgress>,
 ) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
         ui.horizontal(|ui| {
@@ -87,6 +88,31 @@ pub fn render_status_bar(
                 ui.label("🎯 Autofocus: Initializing...");
             } else {
                 ui.label("Autofocus: Off");
+            }
+
+            ui.separator();
+
+            // Optimization progress bar (when running OptimizeAll)
+            if let Some(progress) = optimization_progress {
+                let phase_name = match progress.phase {
+                    crate::app_types::OptimizationPhase::Recoloring => "Recoloring",
+                    crate::app_types::OptimizationPhase::MicroPolishing => "Micro-polishing",
+                };
+
+                let percent = if progress.total > 0 {
+                    (progress.current as f32 / progress.total as f32) * 100.0
+                } else {
+                    0.0
+                };
+
+                // Create progress bar string
+                let bar_width = 10;
+                let filled = ((percent / 100.0) * bar_width as f32) as usize;
+                let empty = bar_width - filled;
+                let bar_str = format!("[{}{}]", "█".repeat(filled), "░".repeat(empty));
+
+                ui.label(format!("{} {:.0}% - {}: {}/{}",
+                    bar_str, percent, phase_name, progress.current, progress.total));
             }
 
             // right-aligned: image dimensions
