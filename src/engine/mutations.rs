@@ -216,10 +216,11 @@ impl Engine {
 
         let vert_idx = self.rng.random_range(0..num_points);
 
-        // Jitter the vertex by ±10 pixels (matching movePoint line 91-92)
+        // Jitter the vertex by ±10 pixels (scaled adaptively if enabled)
+        let jitter = 10.0 * self.step_scale();
         let (mut x, mut y) = candidate.polys[poly_idx].points[vert_idx];
-        x += self.rng.random_range(-10.0..10.0);
-        y += self.rng.random_range(-10.0..10.0);
+        x += self.rng.random_range(-jitter..jitter);
+        y += self.rng.random_range(-jitter..jitter);
         x = x.clamp(0.0, candidate.width as f32 - 1.0);
         y = y.clamp(0.0, candidate.height as f32 - 1.0);
 
@@ -256,6 +257,74 @@ impl Engine {
 
         // Return result with dirty rect - caller will commit via update_current_in_rect() if fitness improved
         Some((rgba2, fit2, dirty_union))
+    }
+
+    /// Recolor a random polygon by applying small RGBA jitter.
+    /// This is a color-only mutation that doesn't change shape.
+    /// If a focus region is set, ONLY recolors polygons in that region (strict focus discipline).
+    /// Returns Some((rgba, fitness, dirty_rect)) if mutation occurred, None otherwise.
+    pub(super) fn recolor_poly<F>(&mut self, candidate: &mut Genome, _update_callback: &mut F) -> Option<(Vec<u8>, f64, Option<DirtyRect>)>
+    where
+        F: FnMut(&Genome, &[u8], f64, bool),
+    {
+        profiling::scope!("recolor_poly");
+        if candidate.polys.is_empty() {
+            return None;
+        }
+
+        // If focus region is set, try to find a polygon in that region
+        let poly_idx = if let Some(region) = &self.focus_region {
+            let mut found_idx = None;
+            for _ in 0..500 {  // Increased from 100
+                let test_idx = self.rng.random_range(0..candidate.polys.len());
+                if candidate.polys[test_idx].intersects_region(region, candidate.width, candidate.height) {
+                    found_idx = Some(test_idx);
+                    break;
+                }
+            }
+            // Strict focus discipline: skip mutation if no polygon found in region
+            match found_idx {
+                Some(idx) => idx,
+                None => return None,  // Skip this recolor - no suitable polygon in focus region
+            }
+        } else {
+            self.rng.random_range(0..candidate.polys.len())
+        };
+
+        // Clone polygon and modify color
+        let mut new_poly = (*candidate.polys[poly_idx]).clone();
+
+        // Apply small random jitter to RGBA (±2/255 by default, scaled adaptively)
+        let step = self.cfg.color_step * 2.0 * self.step_scale();  // Slightly larger than optimize_colors_fast for exploration
+        let mut jitter = |v: f32| -> f32 {
+            let delta = self.rng.random_range(-step..step);
+            (v + delta).clamp(0.0, 1.0)
+        };
+
+        new_poly.rgba[0] = jitter(new_poly.rgba[0]);  // R
+        new_poly.rgba[1] = jitter(new_poly.rgba[1]);  // G
+        new_poly.rgba[2] = jitter(new_poly.rgba[2]);  // B
+
+        // Also jitter alpha (with alpha constraints)
+        let alpha_delta = self.rng.random_range(-step * 2.0..step * 2.0);
+        new_poly.rgba[3] = (new_poly.rgba[3] + alpha_delta).clamp(self.cfg.alpha_min, self.cfg.alpha_max);
+
+        candidate.polys[poly_idx] = Arc::new(new_poly);
+
+        // Render and evaluate
+        let rgba = CpuRenderer::render_rgba_premul(candidate);
+        let fitness = self.compute_fitness(&rgba, Some(self.current_fitness as u64));
+
+        // Compute dirty rect (AABB of the polygon)
+        let (x_min, y_min, x_max, y_max) = crate::fitness::poly_bounds_aa(
+            &candidate.polys[poly_idx],
+            candidate.width,
+            candidate.height,
+        );
+        let dirty_rect = Some(crate::geom::DirtyRect::new(x_min, y_min, x_max, y_max));
+
+        // Return result - caller will commit via update_current_in_rect() if fitness improved
+        Some((rgba, fitness, dirty_rect))
     }
 
     /// Generate a random mutation and return a candidate genome with fitness + render

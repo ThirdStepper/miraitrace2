@@ -37,7 +37,7 @@ impl Engine {
         let mut current_fitness = self.compute_fitness(&current_render_premul, None);
         let mut dirty: Option<DirtyRect> = None;
 
-        let step = self.cfg.color_step;
+        let step = self.cfg.color_step * self.step_scale();  // Apply adaptive scaling
         use crate::mutation_config::ColorDirection;
         const DIRECTIONS: [ColorDirection; 10] = [
             ColorDirection::Lighter,
@@ -154,7 +154,7 @@ impl Engine {
         let mut current_fitness = self.compute_fitness(&current_render_premul, None);
         let mut dirty: Option<DirtyRect> = None;
 
-        let step = self.cfg.pos_step;
+        let step = self.cfg.pos_step * self.step_scale();  // Apply adaptive scaling
         let dirs: &[(f32, f32)] = &[(step, 0.0), (-step, 0.0), (0.0, step), (0.0, -step)];
         let num_points = best.polys[tri_idx].points.len();
         let mut tests = Vec::with_capacity(num_points * dirs.len());
@@ -251,5 +251,156 @@ impl Engine {
         }
 
         (best, current_render_premul, current_fitness, dirty)
+    }
+
+    /// Re-run fast color optimization on every polygon in z-order (front-to-back).
+    /// This is a global refinement pass to reduce color drift after many mutations.
+    /// Returns the number of polygons that produced an improvement.
+    /// The update_callback is called during optimization to send incremental UI updates.
+    pub fn recolor_all<F>(
+        &mut self,
+        update_callback: &mut F,
+    ) -> usize
+    where
+        F: FnMut(&Genome, &[u8], f64, bool),
+    {
+        profiling::scope!("recolor_all");
+        let mut improved = 0usize;
+        let total_polys = self.genome.polys.len();
+
+        // Iterate through all polygons in z-order (0 = bottom, len-1 = top)
+        for idx in 0..total_polys {
+            let before_fitness = self.current_fitness;
+
+            // Run existing per-poly color refinement
+            let genome_ref = &self.genome.clone();
+            let (optimized_genome, optimized_rgba, optimized_fitness, dirty_rect) =
+                self.optimize_colors_fast(genome_ref, idx, update_callback);
+
+            // Only accept if fitness improved
+            if optimized_fitness < before_fitness {
+                self.genome = optimized_genome;
+
+                // Use incremental tile update if dirty rect available
+                if let Some(rect) = dirty_rect {
+                    self.update_current_in_rect(optimized_rgba, optimized_fitness, rect);
+                } else {
+                    self.update_current(optimized_rgba, optimized_fitness);
+                }
+
+                improved += 1;
+            }
+            // If no improvement, optimization is automatically rejected (no state change)
+        }
+
+        improved
+    }
+
+    /// Periodic micro-polish pass: very small vertex/color nudges on all polygons.
+    /// This is a refinement pass that attempts tiny improvements (1px vertex, 1/255 color).
+    /// Only accepts changes that produce strict fitness improvement.
+    /// Returns the number of polygons that improved.
+    pub fn micro_polish_pass<F>(
+        &mut self,
+        vertex_step: f32,
+        color_step: f32,
+        _update_callback: &mut F,
+    ) -> usize
+    where
+        F: FnMut(&Genome, &[u8], f64, bool),
+    {
+        profiling::scope!("micro_polish_pass");
+        let mut improved = 0usize;
+        let total_polys = self.genome.polys.len();
+
+        // Iterate through all polygons
+        for idx in 0..total_polys {
+            let before_fitness = self.current_fitness;
+
+            // Try vertex micro-polish first (using tiny step)
+            let genome_ref = &self.genome.clone();
+            let base_premul = CpuRenderer::render_up_to_poly_premul(&self.genome, idx);
+            let mut current_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&self.genome, idx, &base_premul);
+            let mut current_fitness = self.current_fitness;
+            let mut best = genome_ref.clone();
+
+            // Micro vertex nudge (very small steps)
+            let dirs: &[(f32, f32)] = &[(vertex_step, 0.0), (-vertex_step, 0.0), (0.0, vertex_step), (0.0, -vertex_step)];
+            let num_points = best.polys[idx].points.len();
+
+            // Try each vertex in each direction
+            'vertex_loop: for vi in 0..num_points {
+                for &(dx, dy) in dirs {
+                    let mut candidate = best.clone();
+                    let (mut x, mut y) = candidate.polys[idx].points[vi];
+                    x = (x + dx).clamp(0.0, (self.width as f32) - 1.0);
+                    y = (y + dy).clamp(0.0, (self.height as f32) - 1.0);
+
+                    let mut new_poly = (*candidate.polys[idx]).clone();
+                    new_poly.points[vi] = (x, y);
+
+                    if self.cfg.enforce_simple_convex {
+                        let mut temp_points = new_poly.points.clone();
+                        if !crate::geom::sanitize_ccw_simple_convex(&mut temp_points) {
+                            continue;
+                        }
+                        new_poly.points = temp_points;
+                    }
+
+                    candidate.polys[idx] = Arc::new(new_poly);
+
+                    let cand_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&candidate, idx, &base_premul);
+                    let cand_fitness = self.compute_fitness(&cand_render_premul, Some(current_fitness as u64));
+
+                    if cand_fitness < current_fitness {
+                        best = candidate;
+                        current_render_premul = cand_render_premul;
+                        current_fitness = cand_fitness;
+                        break 'vertex_loop;  // Accept first improvement and move to color
+                    }
+                }
+            }
+
+            // Micro color nudge (very small steps)
+            use crate::mutation_config::ColorDirection;
+            const DIRECTIONS: [ColorDirection; 10] = [
+                ColorDirection::Lighter,
+                ColorDirection::Darker,
+                ColorDirection::RedUp,
+                ColorDirection::BlueDown,
+                ColorDirection::GreenUp,
+                ColorDirection::RedDown,
+                ColorDirection::BlueUp,
+                ColorDirection::GreenDown,
+                ColorDirection::AlphaDown,
+                ColorDirection::AlphaUp,
+            ];
+
+            'color_loop: for &direction in &DIRECTIONS {
+                let mut candidate = best.clone();
+                let poly = Arc::make_mut(&mut candidate.polys[idx]);
+                crate::mutation_config::apply_color_direction(&mut poly.rgba, direction, color_step, &self.cfg);
+                poly.rgba[3] = poly.rgba[3].clamp(self.cfg.alpha_min, self.cfg.alpha_max);
+
+                let cand_render_premul = CpuRenderer::render_from_poly_on_base_premul_fast(&candidate, idx, &base_premul);
+                let cand_fitness = self.compute_fitness(&cand_render_premul, Some(current_fitness as u64));
+
+                if cand_fitness < current_fitness {
+                    best = candidate;
+                    current_render_premul = cand_render_premul;
+                    current_fitness = cand_fitness;
+                    break 'color_loop;  // Accept first improvement
+                }
+            }
+
+            // Commit if any improvement found for this polygon
+            if current_fitness < before_fitness {
+                self.genome = best;
+                self.update_current(current_render_premul, current_fitness);
+                improved += 1;
+            }
+        }
+
+        improved
     }
 }
