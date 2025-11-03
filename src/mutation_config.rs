@@ -6,10 +6,21 @@ pub struct MutateConfig {
     pub p_reorder: f32,    // chance to reorder z-index (15% in original)
     pub p_move_point: f32, // chance to move a vertex (15% in original)
     pub p_recolor: f32,    // chance to recolor a polygon (new: color-only mutation)
+    pub p_transform: f32,  // chance to translate+scale a polygon (whole-polygon transformation)
+    pub p_multi_vertex: f32,  // chance to move multiple vertices simultaneously (coherent perturbation)
     // remainder = no mutation, just evaluate current state
 
     // mutation parameters (kept for potential future use)
     pub pos_sigma: f32,   // pixel jitter for vertices
+
+    // whole-polygon transform parameters
+    pub transform_translate_max: f32,  // maximum translation distance (pixels)
+    pub transform_scale_min: f32,      // minimum scale factor (e.g., 0.8 = 80%)
+    pub transform_scale_max: f32,      // maximum scale factor (e.g., 1.2 = 120%)
+
+    // multi-vertex perturbation parameters
+    pub multi_vertex_step: f32,        // movement magnitude for multi-vertex mutations (pixels)
+    pub multi_vertex_adjacent_ratio: f32,  // ratio of adjacent vs non-adjacent vertex selection (0.7 = 70% adjacent)
 
     // optimization step sizes
     pub color_step: f32,  // step size for color optimization (N_COLOR_VAR = 5)
@@ -74,6 +85,11 @@ pub struct MutateConfig {
     pub edge_seeding_enabled: bool,     // Enable edge-aware seeding
     pub edge_seeding_probability: f32,  // Probability of edge-guided vs random seeding (0.0-1.0)
     pub edge_seeding_vertex_range_px: f32,  // Vertex placement range along edges (pixels)
+
+    // progressive multi-resolution evolution
+    pub multi_res_enabled: bool,        // Enable multi-resolution evolution (opt-in)
+    pub multi_res_stage1_threshold: f64,  // SAD/px threshold for 1/4x → 1/2x transition
+    pub multi_res_stage2_threshold: f64,  // SAD/px threshold for 1/2x → 1x transition
 }
 
 impl Default for MutateConfig {
@@ -85,10 +101,21 @@ impl Default for MutateConfig {
             p_reorder: 0.15,    // POLYS_REORDER_RATE = 15%
             p_move_point: 0.15, // POINT_MOVE_RATE = 15%
             p_recolor: 0.15,    // New color-only mutation (5%)
-            // remainder: 30% = no mutation
+            p_transform: 0.10,  // Whole-polygon translate+scale (10%)
+            p_multi_vertex: 0.08,  // Multi-vertex perturbation (8%)
+            // remainder: 12% = no mutation
 
-            // mutation parameters 
+            // mutation parameters
             pos_sigma: 10.0,     // ±10 pixels for random mutations
+
+            // whole-polygon transform parameters
+            transform_translate_max: 20.0,  // ±20 pixels translation
+            transform_scale_min: 0.8,       // 80% minimum size
+            transform_scale_max: 1.2,       // 120% maximum size
+
+            // multi-vertex perturbation parameters
+            multi_vertex_step: 10.0,        // 10 pixels movement magnitude
+            multi_vertex_adjacent_ratio: 0.7,  // 70% adjacent, 30% non-adjacent
 
             // optimization step sizes 
             color_step: 5.0 / 255.0,  
@@ -153,6 +180,11 @@ impl Default for MutateConfig {
             edge_seeding_enabled: true,           // On by default
             edge_seeding_probability: 0.7,        // 70% edge-guided, 30% random (exploration)
             edge_seeding_vertex_range_px: 12.0,   // ±12 pixels along edge directions
+
+            // progressive multi-resolution evolution (opt-in)
+            multi_res_enabled: false,             // Off by default (opt-in feature)
+            multi_res_stage1_threshold: 50.0,     // 50 SAD/px: transition from 1/4x to 1/2x
+            multi_res_stage2_threshold: 15.0,     // 15 SAD/px: transition from 1/2x to 1x
         }
     }
 }

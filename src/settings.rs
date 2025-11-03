@@ -145,6 +145,24 @@ pub struct AppSettings {
     pub p_move_point: f32,
     /// Probability of recoloring a polygon (color-only mutation) per generation
     pub p_recolor: f32,
+    /// Probability of transforming a polygon (translate + scale) per generation
+    pub p_transform: f32,
+    /// Probability of moving multiple vertices simultaneously per generation
+    pub p_multi_vertex: f32,
+
+    // Whole-Polygon Transform Parameters
+    /// Maximum translation distance for transform mutation (in pixels)
+    pub transform_translate_max: f32,
+    /// Minimum scale factor for transform mutation (e.g., 0.8 = 80%)
+    pub transform_scale_min: f32,
+    /// Maximum scale factor for transform mutation (e.g., 1.2 = 120%)
+    pub transform_scale_max: f32,
+
+    // Multi-Vertex Perturbation Parameters
+    /// Movement magnitude for multi-vertex mutations (in pixels)
+    pub multi_vertex_step: f32,
+    /// Ratio of adjacent vs non-adjacent vertex selection (0.7 = 70% adjacent)
+    pub multi_vertex_adjacent_ratio: f32,
 
     // Alpha Range
     /// Minimum alpha (opacity) for triangles (0.0 = transparent, 1.0 = opaque)
@@ -251,6 +269,14 @@ pub struct AppSettings {
     /// Vertex placement range along edges (in pixels, e.g., 12.0)
     pub edge_seeding_vertex_range_px: f32,
 
+    // Progressive Multi-Resolution Evolution
+    /// Enable progressive multi-resolution evolution (opt-in feature)
+    pub multi_res_enabled: bool,
+    /// SAD/px threshold for transitioning from 1/4x to 1/2x (default: 50.0)
+    pub multi_res_stage1_threshold: f64,
+    /// SAD/px threshold for transitioning from 1/2x to 1x (default: 15.0)
+    pub multi_res_stage2_threshold: f64,
+
     // Preview Supersampling - UI-only enhancement
     /// Enable preview supersampling (SSAA for cleaner UI rendering)
     pub preview_supersample_enabled: bool,
@@ -296,7 +322,18 @@ impl Default for AppSettings {
             p_reorder: 0.15,    // 15%
             p_move_point: 0.15, // 15%
             p_recolor: 0.15,    // 5% (new color-only mutation)
-            // Remainder: 20% = no mutation
+            p_transform: 0.10,  // 10% (whole-polygon translate+scale)
+            p_multi_vertex: 0.08,  // 8% (multi-vertex perturbation)
+            // Remainder: 2% = no mutation
+
+            // Whole-polygon transform parameters
+            transform_translate_max: 20.0,  // ±20 pixels translation
+            transform_scale_min: 0.8,       // 80% minimum size
+            transform_scale_max: 1.2,       // 120% maximum size
+
+            // Multi-vertex perturbation parameters
+            multi_vertex_step: 10.0,        // 10 pixels movement magnitude
+            multi_vertex_adjacent_ratio: 0.7,  // 70% adjacent, 30% non-adjacent
 
             // Alpha range (20-200 in [0,255])
             alpha_min: 20.0 / 255.0,
@@ -362,9 +399,14 @@ impl Default for AppSettings {
             alpha_schedule_curve: 1.5,            // Curve exponent (smooth transition)
 
             // Edge-aware Polygon Seeding - enabled by default
-            edge_seeding_enabled: true,           // On by default 
+            edge_seeding_enabled: true,           // On by default
             edge_seeding_probability: 0.7,        // 70% edge-guided, 30% random (exploration)
             edge_seeding_vertex_range_px: 12.0,   // ±12 pixels along edge directions
+
+            // Progressive Multi-Resolution Evolution - opt-in
+            multi_res_enabled: false,             // Off by default (opt-in feature)
+            multi_res_stage1_threshold: 50.0,     // 50 SAD/px: transition from 1/4x to 1/2x
+            multi_res_stage2_threshold: 15.0,     // 15 SAD/px: transition from 1/2x to 1x
 
             // Preview Supersampling - enabled by default
             preview_supersample_enabled: true,    // On by default (UI-only, no SVG impact)
@@ -510,7 +552,14 @@ impl AppSettings {
             p_reorder: self.p_reorder,
             p_move_point: self.p_move_point,
             p_recolor: self.p_recolor,
+            p_transform: self.p_transform,
+            p_multi_vertex: self.p_multi_vertex,
             pos_sigma: 10.0,  // Not exposed in UI (random mutations)
+            transform_translate_max: self.transform_translate_max,
+            transform_scale_min: self.transform_scale_min,
+            transform_scale_max: self.transform_scale_max,
+            multi_vertex_step: self.multi_vertex_step,
+            multi_vertex_adjacent_ratio: self.multi_vertex_adjacent_ratio,
             color_step: self.color_step,
             pos_step: self.pos_step,
             min_tris: self.min_tris,
@@ -549,6 +598,9 @@ impl AppSettings {
             edge_seeding_enabled: self.edge_seeding_enabled,
             edge_seeding_probability: self.edge_seeding_probability,
             edge_seeding_vertex_range_px: self.edge_seeding_vertex_range_px,
+            multi_res_enabled: self.multi_res_enabled,
+            multi_res_stage1_threshold: self.multi_res_stage1_threshold,
+            multi_res_stage2_threshold: self.multi_res_stage2_threshold,
         }
     }
 }

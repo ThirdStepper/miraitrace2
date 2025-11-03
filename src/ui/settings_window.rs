@@ -168,11 +168,74 @@ pub fn show_settings_window(
                         ui.add_space(3.0);
 
                         ui.horizontal(|ui| {
-                            ui.label("Recolor Polygon (NEW):");
+                            ui.label("Recolor Polygon:");
                             ui.add(egui::Slider::new(&mut settings.p_recolor, 0.0..=1.0)
                                 .text("probability"));
                         });
                         ui.label("  Color-only mutation (no shape change)");
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Transform Polygon (NEW):");
+                            ui.add(egui::Slider::new(&mut settings.p_transform, 0.0..=1.0)
+                                .text("probability"));
+                        });
+                        ui.label("  Translate + scale whole polygon (useful when shape is right but misaligned)");
+                        ui.add_space(5.0);
+
+                        ui.add_enabled_ui(settings.p_transform > 0.0, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("  Translation Range:");
+                                ui.add(egui::Slider::new(&mut settings.transform_translate_max, 5.0..=50.0)
+                                    .text("pixels"));
+                            });
+                            ui.label("    Maximum distance to shift polygon (default: 20px)");
+                            ui.add_space(3.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label("  Scale Range:");
+                                ui.add(egui::Slider::new(&mut settings.transform_scale_min, 0.5..=0.95)
+                                    .text("min"));
+                                ui.add(egui::Slider::new(&mut settings.transform_scale_max, 1.05..=2.0)
+                                    .text("max"));
+                            });
+                            ui.label("    Uniform scale factor applied around centroid (default: 0.8-1.2)");
+                        });
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.label("Multi-Vertex Perturbation (NEW):");
+                            ui.add(egui::Slider::new(&mut settings.p_multi_vertex, 0.0..=1.0)
+                                .text("probability"));
+                        });
+                        ui.label("  Move 2-3 vertices coherently (edge shift, rotation, or jitter)");
+                        ui.label("  • Captures improvements single-vertex moves miss");
+                        ui.label("  • Lower probability due to higher disruption potential");
+                        ui.add_space(5.0);
+
+                        ui.add_enabled_ui(settings.p_multi_vertex > 0.0, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("  Movement Step Size:");
+                                ui.add(egui::Slider::new(&mut settings.multi_vertex_step, 5.0..=30.0)
+                                    .text("pixels"));
+                            });
+                            ui.label("    Distance vertices move in each pattern (default: 10px)");
+                            ui.add_space(3.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label("  Adjacent Vertex Ratio:");
+                                ui.add(egui::Slider::new(&mut settings.multi_vertex_adjacent_ratio, 0.0..=1.0)
+                                    .text("%")
+                                    .custom_formatter(|n, _| format!("{:.0}%", n * 100.0)));
+                            });
+                            ui.label("    Probability of selecting adjacent vs non-adjacent vertices (default: 70%)");
+                            ui.add_space(3.0);
+
+                            ui.label(egui::RichText::new("  Movement Patterns:").strong().color(egui::Color32::from_rgb(100, 200, 255)));
+                            ui.label("    • Edge Shift: Move 2 vertices perpendicular to their connecting edge");
+                            ui.label("    • Face Rotation: Rotate 2-3 vertices around their centroid (±5-15°)");
+                            ui.label("    • Coherent Jitter: Move 2-3 vertices in similar direction with noise");
+                        });
                         ui.add_space(10.0);
 
                         ui.separator();
@@ -489,6 +552,47 @@ pub fn show_settings_window(
                                     .custom_formatter(|n, _| format!("Top {:.0}%", (1.0 - n) * 100.0)));
                             });
                             ui.label("    Select polygons from top X% highest error (0.75 = top 25%)");
+                        });
+
+                        ui.add_space(12.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        // ---- PROGRESSIVE MULTI-RESOLUTION EVOLUTION ----
+                        ui.label(egui::RichText::new("Progressive Multi-Resolution Evolution").strong());
+                        ui.add_space(3.0);
+
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut settings.multi_res_enabled, "Enable Multi-Resolution Evolution");
+                        });
+                        ui.label("  Evolve at lower resolutions first (1/4x → 1/2x → 1x)");
+                        ui.label("  • Nail global structure/color first (fast coarse evolution)");
+                        ui.label("  • Refine detail later (transitions based on SAD/px)");
+                        ui.label("  • Opt-in feature - starts at 1/4x resolution");
+                        ui.add_space(5.0);
+
+                        ui.add_enabled_ui(settings.multi_res_enabled, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("  Stage 1 Threshold (1/4x → 1/2x):");
+                                ui.add(egui::Slider::new(&mut settings.multi_res_stage1_threshold, 20.0..=100.0)
+                                    .text("SAD/px"));
+                            });
+                            ui.label("    Transition when image quality improves to this level (default: 50 SAD/px)");
+                            ui.add_space(3.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label("  Stage 2 Threshold (1/2x → 1x):");
+                                ui.add(egui::Slider::new(&mut settings.multi_res_stage2_threshold, 5.0..=50.0)
+                                    .text("SAD/px"));
+                            });
+                            ui.label("    Transition to full resolution at this quality (default: 15 SAD/px)");
+                            ui.add_space(3.0);
+
+                            ui.label(egui::RichText::new("  How it works:").strong().color(egui::Color32::from_rgb(100, 200, 255)));
+                            ui.label("    1. Start at 1/4x resolution (16× fewer pixels, very fast)");
+                            ui.label("    2. Transition to 1/2x when SAD/px ≤ stage1_threshold");
+                            ui.label("    3. Transition to 1x (full res) when SAD/px ≤ stage2_threshold");
+                            ui.label("    4. Polygon coordinates are automatically scaled up at each transition");
                         });
                     });
 

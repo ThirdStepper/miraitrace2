@@ -74,6 +74,9 @@ pub struct Engine {
     pub height: u32,           // Cached image height
     pub generation: u64,       // Generation counter (incremented during optimization)
     pub(self) num_poly_points: usize, // Progressive detail: starts at 6, reduces to 3
+    // Progressive multi-resolution evolution
+    pub(self) multi_res_stage: u8,        // Current resolution stage: 0=1/4x, 1=1/2x, 2=1x (full res)
+    pub(self) multi_res_scale_factor: f32, // Current scale factor: 0.25, 0.5, or 1.0
     pub focus_region: Option<FocusRegion>, // Optional region for targeted evolution
     // Autofocus settings
     pub autofocus_enabled: bool,     // Enable/disable autofocus (default: true)
@@ -210,6 +213,7 @@ impl Engine {
         let initial_poly_points = cfg.max_vertices;
         let micro_polish_vertex_step = cfg.micro_polish_vertex_step;
         let micro_polish_color_step = cfg.micro_polish_color_step;
+        let multi_res_enabled = cfg.multi_res_enabled;
 
         let mut this = Self {
             rng,
@@ -232,6 +236,9 @@ impl Engine {
             height,
             generation: 0,
             num_poly_points: initial_poly_points, // Start with max vertices from arity mode
+            // Multi-resolution evolution: start at 1/4x if enabled, otherwise 1x (full res)
+            multi_res_stage: if multi_res_enabled { 0 } else { 2 },
+            multi_res_scale_factor: if multi_res_enabled { 0.25 } else { 1.0 },
             focus_region: None, // Start with full image focus
             // Autofocus settings from EngineInit (no hardcoded defaults!)
             autofocus_enabled: init.autofocus_enabled,
@@ -357,6 +364,53 @@ impl Engine {
         self.cfg.alpha_max = alpha_max_new;
     }
 
+    /// Check and perform multi-resolution stage transitions based on SAD/px thresholds.
+    /// Transitions: 1/4x → 1/2x at 50 SAD/px, 1/2x → 1x at 15 SAD/px.
+    /// When transitioning, scales genome coordinates up to the new resolution.
+    pub(self) fn check_multi_res_transition(&mut self) {
+        if !self.cfg.multi_res_enabled || self.multi_res_stage >= 2 {
+            return;  // Already at full resolution or feature disabled
+        }
+
+        // Compute SAD per pixel from current metrics
+        let sad_per_px = self.last_metrics.sad_per_px;
+
+        // Check for transition based on current stage
+        let should_transition = match self.multi_res_stage {
+            0 => sad_per_px <= self.cfg.multi_res_stage1_threshold,  // 1/4x → 1/2x at 50 SAD/px
+            1 => sad_per_px <= self.cfg.multi_res_stage2_threshold,  // 1/2x → 1x at 15 SAD/px
+            _ => false,
+        };
+
+        if should_transition {
+            // Compute scale-up factor
+            let old_factor = self.multi_res_scale_factor;
+            let new_stage = self.multi_res_stage + 1;
+            let new_factor = match new_stage {
+                1 => 0.5,  // 1/2x
+                2 => 1.0,  // 1x (full res)
+                _ => 1.0,
+            };
+
+            let scale_ratio = new_factor / old_factor;
+
+            // Scale genome coordinates up
+            self.genome.scale_coords(scale_ratio);
+
+            // Update stage and scale factor
+            self.multi_res_stage = new_stage;
+            self.multi_res_scale_factor = new_factor;
+
+            // Re-render at new resolution
+            let rgba = CpuRenderer::render_rgba_premul(&self.genome);
+            let fitness = self.compute_fitness(&rgba, None);
+            self.update_current(rgba, fitness);
+
+            println!("Multi-res transition: stage {} → {} (scale {:.2}× → {:.2}×, SAD/px: {:.2})",
+                self.multi_res_stage - 1, self.multi_res_stage, old_factor, new_factor, sad_per_px);
+        }
+    }
+
     /// Compute full-image fitness, routing to weighted SAD if perceptual weights are enabled.
     /// This is the unified fitness function used throughout the engine.
     #[inline]
@@ -450,6 +504,8 @@ impl Engine {
             self.update_progressive_params();
             // Also update alpha schedule if enabled (runs frequently for smooth transitions)
             self.update_alpha_schedule();
+            // Check for multi-resolution stage transitions (based on SAD/px)
+            self.check_multi_res_transition();
         }
 
         // Autofocus: periodically re-evaluate which region has highest error
@@ -546,6 +602,18 @@ impl Engine {
 
             if self.rng.random::<f32>() < self.cfg.p_recolor {
                 if let Some((rgba, fit, dirty)) = self.recolor_poly(&mut candidate, update_callback) {
+                    out_from_opt = Some((rgba, fit, dirty));
+                }
+            }
+
+            if self.rng.random::<f32>() < self.cfg.p_transform {
+                if let Some((rgba, fit, dirty)) = self.transform_poly(&mut candidate, update_callback) {
+                    out_from_opt = Some((rgba, fit, dirty));
+                }
+            }
+
+            if self.rng.random::<f32>() < self.cfg.p_multi_vertex {
+                if let Some((rgba, fit, dirty)) = self.move_multi_vertex(&mut candidate, update_callback) {
                     out_from_opt = Some((rgba, fit, dirty));
                 }
             }
