@@ -74,6 +74,7 @@ pub fn load_target_image(
                     metrics: engine.last_metrics,
                     weighted_sad: engine.avg_weight_q8.map(|_| engine.current_fitness),
                     perceptual_k: engine.perceptual_k_q8(),
+                    optimization_progress: None,
                 });
 
                 loop {
@@ -107,9 +108,8 @@ pub fn load_target_image(
                             EngineCommand::TriggerAutofocus => {
                                 engine.update_autofocus();  // force immediate autofocus update
                             }
-                            EngineCommand::RecolorAll => {
-                                // Run global color refinement pass on all polygons
-                                // Uses a simplified callback that doesn't need genome info
+                            EngineCommand::OptimizeAll => {
+                                // Combined optimization: recolor_all + micro_polish_pass with progress tracking
                                 let update_tx_clone = update_tx.clone();
                                 let ctx_clone_inner = ctx_clone.clone();
                                 let baseline = engine.baseline_fitness;
@@ -154,13 +154,75 @@ pub fn load_target_image(
                                         metrics,
                                         weighted_sad: avg_weight.map(|_| fitness_val),
                                         perceptual_k,
+                                        optimization_progress: None,
                                     });
                                     ctx_clone_inner.request_repaint();
                                 };
 
-                                let improved_count = engine.recolor_all(&mut update_callback);
+                                // Phase 1: Recolor all polygons
+                                // Create progress callback that only sends progress updates (no full state)
+                                // We'll send a full state update after recolor completes
+                                let update_tx_progress = update_tx.clone();
+                                let ctx_progress = ctx_clone.clone();
+                                let mut recolor_progress = |current: usize, total: usize| {
+                                    // Send a minimal "progress-only" update
+                                    // (we use a dummy EngineUpdate with only progress field set)
+                                    let _ = update_tx_progress.send(EngineUpdate {
+                                        current_rgba: Arc::from(&[][..]), // dummy empty
+                                        generation: 0,
+                                        fitness: 0.0,
+                                        triangles: 0,
+                                        autofocus_tiles: None,
+                                        focus_region: None,
+                                        focus_tile_indices: None,
+                                        metrics: crate::fitness::MetricsSnapshot::default(),
+                                        weighted_sad: None,
+                                        perceptual_k: None,
+                                        optimization_progress: Some(crate::app_types::OptimizationProgress {
+                                            current,
+                                            total,
+                                            phase: crate::app_types::OptimizationPhase::Recoloring,
+                                        }),
+                                    });
+                                    ctx_progress.request_repaint();
+                                };
 
-                                // Send final update with improved count (could log or show notification)
+                                let recolor_improved = engine.recolor_all(&mut update_callback, &mut recolor_progress);
+
+                                // Phase 2: Micro-polish all polygons
+                                // Create progress callback that only sends progress updates (no full state)
+                                let update_tx_progress2 = update_tx.clone();
+                                let ctx_progress2 = ctx_clone.clone();
+                                let mut polish_progress = |current: usize, total: usize| {
+                                    // Send a minimal "progress-only" update
+                                    let _ = update_tx_progress2.send(EngineUpdate {
+                                        current_rgba: Arc::from(&[][..]), // dummy empty
+                                        generation: 0,
+                                        fitness: 0.0,
+                                        triangles: 0,
+                                        autofocus_tiles: None,
+                                        focus_region: None,
+                                        focus_tile_indices: None,
+                                        metrics: crate::fitness::MetricsSnapshot::default(),
+                                        weighted_sad: None,
+                                        perceptual_k: None,
+                                        optimization_progress: Some(crate::app_types::OptimizationProgress {
+                                            current,
+                                            total,
+                                            phase: crate::app_types::OptimizationPhase::MicroPolishing,
+                                        }),
+                                    });
+                                    ctx_progress2.request_repaint();
+                                };
+
+                                let polish_improved = engine.micro_polish_pass(
+                                    engine.micro_polish_vertex_step,
+                                    engine.micro_polish_color_step,
+                                    &mut update_callback,
+                                    &mut polish_progress,
+                                );
+
+                                // Send final update (clear progress)
                                 let _ = update_tx.send(EngineUpdate {
                                     current_rgba: Arc::from(engine.current_rgba.as_slice()),
                                     generation: engine.generation,
@@ -172,11 +234,14 @@ pub fn load_target_image(
                                     metrics: engine.last_metrics,
                                     weighted_sad: engine.avg_weight_q8.map(|_| engine.current_fitness),
                                     perceptual_k: engine.perceptual_k_q8(),
+                                    optimization_progress: None,
                                 });
                                 ctx_clone.request_repaint();
 
-                                // Log result (visible in console)
-                                println!("Recolor All: improved {} / {} polygons", improved_count, engine.genome.polys.len());
+                                // Log result
+                                println!("Optimize All complete: recolor improved {} / {}, micro-polish improved {} / {} polygons",
+                                    recolor_improved, engine.genome.polys.len(),
+                                    polish_improved, engine.genome.polys.len());
                             }
                         }
                     }
@@ -235,6 +300,7 @@ pub fn load_target_image(
                                 metrics,
                                 weighted_sad: avg_weight.map(|_| fitness_val),
                                 perceptual_k,
+                                optimization_progress: None,
                             });
                             ctx_clone_inner.request_repaint();
                         };
@@ -264,6 +330,7 @@ pub fn load_target_image(
                             metrics: engine.last_metrics,
                             weighted_sad: engine.avg_weight_q8.map(|_| engine.current_fitness),
                             perceptual_k: engine.perceptual_k_q8(),
+                            optimization_progress: None,
                         });
                         ctx_clone.request_repaint();
                     } else {
@@ -323,6 +390,12 @@ pub fn update_current_texture(
         (w, h, rgba.to_vec())
     };
 
+    // TODO Preview Supersampling - Apply SSAA here for cleaner UI rendering
+    // If settings.preview_supersample_enabled:
+    //   1. Render to offscreen buffer at (preview_w * scale, preview_h * scale)
+    //   2. Downsample using box/tent filter to (preview_w, preview_h)
+    //   3. This is UI-only enhancement - does NOT affect SVG export or fitness
+    // Current: Direct mapping from preview_data → ColorImage (no supersampling)
     let img = ColorImage::from_rgba_premultiplied([preview_w, preview_h], &preview_data);
 
     if let Some(tex) = current_tex.as_mut() {
@@ -351,6 +424,7 @@ pub fn poll_engine_updates(
     autofocus_tiles: &mut Option<Vec<(usize, f64, FocusRegion)>>,
     autofocus_active_region: &mut Option<FocusRegion>,
     autofocus_active_indices: &mut Option<Vec<usize>>,
+    optimization_progress: &mut Option<crate::app_types::OptimizationProgress>,
 ) {
     profiling::scope!("poll_engine_updates");
     if let Some(rx) = update_rx {
@@ -362,17 +436,26 @@ pub fn poll_engine_updates(
 
         // apply the latest update if we got one
         if let Some(update) = latest_update {
-            *generation = update.generation;
-            *fitness = update.fitness;
-            *triangles = update.triangles;
-            *metrics = update.metrics;
-            *weighted_sad = update.weighted_sad;
-            *perceptual_k = update.perceptual_k;
+            // Check if this is a progress-only update (empty rgba)
+            let is_progress_only = update.current_rgba.is_empty();
 
-            // throttled texture upload: only upload if enough time has elapsed OR counter threshold reached
-            if upload_gate.should_upload() {
-                update_current_texture(ctx, target_dims, current_tex, &update.current_rgba);
+            if !is_progress_only {
+                // Full update - update all state
+                *generation = update.generation;
+                *fitness = update.fitness;
+                *triangles = update.triangles;
+                *metrics = update.metrics;
+                *weighted_sad = update.weighted_sad;
+                *perceptual_k = update.perceptual_k;
+
+                // throttled texture upload: only upload if enough time has elapsed OR counter threshold reached
+                if upload_gate.should_upload() {
+                    update_current_texture(ctx, target_dims, current_tex, &update.current_rgba);
+                }
             }
+
+            // Always update progress (works for both full and progress-only updates)
+            *optimization_progress = update.optimization_progress;
 
             // update autofocus tile data if present (sent when autofocus re-evaluates)
             if update.autofocus_tiles.is_some() {

@@ -35,7 +35,6 @@ unsafe fn sad_simd_chunk(target: &[u8], current: &[u8]) -> u64 {
 }
 
 /// parallel SIMD-accelerated SAD using Rayon + x86_64 intrinsics.
-/// matches the original Evolve's multi-core SIMD implementation.
 /// early-exit optimization: If best_so_far is provided and accumulated SAD exceeds it,
 /// returns u64::MAX immediately to signal "definitely worse than current best".
 #[cfg(target_arch = "x86_64")]

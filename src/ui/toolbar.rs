@@ -91,10 +91,10 @@ pub fn render_toolbar(
                     }
                 }
 
-                // Recolor All button - global color refinement pass
-                if ui.button("🎨 Recolor All").on_hover_text("Re-optimize colors on all polygons (reduces drift)").clicked() {
+                // Optimize polygons button - combined recolor + micro-polish pass
+                if ui.button("✨ Optimize polygons").on_hover_text("Re-optimize colors and micro-polish all polygons (reduces drift)").clicked() {
                     if let Some(tx) = command_tx {
-                        let _ = tx.send(EngineCommand::RecolorAll);
+                        let _ = tx.send(EngineCommand::OptimizeAll);
                     }
                 }
             });

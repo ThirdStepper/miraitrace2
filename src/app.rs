@@ -38,6 +38,9 @@ pub struct MiraiApp {
     autofocus_active_region: Option<FocusRegion>,  // region currently being used by engine (from autofocus)
     autofocus_active_indices: Option<Vec<usize>>,  // which tile indices are active
 
+    // optimization progress tracking
+    optimization_progress: Option<crate::app_types::OptimizationProgress>,
+
     // UI upload throttling for large images (150ms or every 100 updates)
     upload_gate: UiUploadGate,
 
@@ -77,6 +80,7 @@ impl MiraiApp {
             autofocus_tiles: None,
             autofocus_active_region: None,
             autofocus_active_indices: None,
+            optimization_progress: None,
             upload_gate: UiUploadGate::new(settings.gui_update_rate),
             #[cfg(feature = "profile-with-tracy")]
             show_tracy_info: false,
@@ -106,6 +110,7 @@ impl eframe::App for MiraiApp {
             &mut self.autofocus_tiles,
             &mut self.autofocus_active_region,
             &mut self.autofocus_active_indices,
+            &mut self.optimization_progress,
         );
 
         // handle keyboard shortcuts
@@ -252,6 +257,7 @@ impl eframe::App for MiraiApp {
             &self.autofocus_tiles,
             &self.autofocus_active_indices,
             self.target_dims,
+            &self.optimization_progress,
         );
 
         // central panel with side-by-side images

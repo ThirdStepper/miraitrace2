@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use rayon::prelude::*;
+use rand::Rng;
 
 use crate::dna::Genome;
 use crate::fitness::{poly_bounds_aa, sad_rgb_rect_pyramid, blit_rect};
@@ -257,12 +258,15 @@ impl Engine {
     /// This is a global refinement pass to reduce color drift after many mutations.
     /// Returns the number of polygons that produced an improvement.
     /// The update_callback is called during optimization to send incremental UI updates.
-    pub fn recolor_all<F>(
+    /// The progress_callback is called after each polygon to report progress.
+    pub fn recolor_all<F, P>(
         &mut self,
         update_callback: &mut F,
+        progress_callback: &mut P,
     ) -> usize
     where
         F: FnMut(&Genome, &[u8], f64, bool),
+        P: FnMut(usize, usize),
     {
         profiling::scope!("recolor_all");
         let mut improved = 0usize;
@@ -291,6 +295,9 @@ impl Engine {
                 improved += 1;
             }
             // If no improvement, optimization is automatically rejected (no state change)
+
+            // Report progress after each polygon
+            progress_callback(idx + 1, total_polys);
         }
 
         improved
@@ -300,14 +307,17 @@ impl Engine {
     /// This is a refinement pass that attempts tiny improvements (1px vertex, 1/255 color).
     /// Only accepts changes that produce strict fitness improvement.
     /// Returns the number of polygons that improved.
-    pub fn micro_polish_pass<F>(
+    /// The progress_callback is called after each polygon to report progress.
+    pub fn micro_polish_pass<F, P>(
         &mut self,
         vertex_step: f32,
         color_step: f32,
         _update_callback: &mut F,
+        progress_callback: &mut P,
     ) -> usize
     where
         F: FnMut(&Genome, &[u8], f64, bool),
+        P: FnMut(usize, usize),
     {
         profiling::scope!("micro_polish_pass");
         let mut improved = 0usize;
@@ -399,8 +409,127 @@ impl Engine {
                 self.update_current(current_render_premul, current_fitness);
                 improved += 1;
             }
+
+            // Report progress after each polygon
+            progress_callback(idx + 1, total_polys);
+        }
+
+        // Tiny-polygon cleanup phase (combine with micro-polish)
+        // Remove polygons below area threshold if fitness impact is negligible
+        if self.cfg.micro_polish_cleanup_enabled {
+            let min_area = self.cfg.micro_polish_min_area_px;
+            let epsilon = self.cfg.micro_polish_cleanup_epsilon as f64;
+            let baseline_fitness = self.current_fitness;
+            let max_allowed_fitness = baseline_fitness * (1.0 + epsilon);
+
+            let mut deletion_candidates = Vec::new();
+
+            // Identify tiny polygons
+            for idx in 0..self.genome.polys.len() {
+                let area = crate::geom::polygon_area(&self.genome.polys[idx].points);
+                if area < min_area {
+                    deletion_candidates.push(idx);
+                }
+            }
+
+            // Try deleting tiny polygons (reverse order to preserve indices)
+            let mut deleted = 0;
+            for &idx in deletion_candidates.iter().rev() {
+                let mut candidate = self.genome.clone();
+                candidate.polys.remove(idx);
+
+                let rgba = CpuRenderer::render_rgba_premul(&candidate);
+                let fitness = self.compute_fitness(&rgba, Some(baseline_fitness as u64));
+
+                // Accept deletion if fitness stays within tolerance
+                if fitness <= max_allowed_fitness {
+                    self.genome = candidate;
+                    self.update_current(rgba, fitness);
+                    deleted += 1;
+                }
+            }
+
+            if deleted > 0 {
+                println!("Micro-polish cleanup: removed {} tiny polygons", deleted);
+            }
         }
 
         improved
+    }
+
+    /// Smart layer reorder: Try bubble moves to optimize z-order locally
+    /// Returns Some((genome, rgba, fitness)) if improvement found, None otherwise
+    pub(super) fn try_smart_reorder(&mut self) -> Option<(Genome, Vec<u8>, f64)> {
+        profiling::scope!("try_smart_reorder");
+
+        let num_polys = self.genome.polys.len();
+        if num_polys < 2 {
+            return None; // Need at least 2 polygons to reorder
+        }
+
+        // Error-based polygon selection (target high-error polygons likely to have z-order issues)
+        let mut poly_errors: Vec<(usize, f64)> = Vec::with_capacity(num_polys);
+        for idx in 0..num_polys {
+            let bbox = poly_bounds_aa(&self.genome.polys[idx], self.width, self.height);
+            let (x_min, y_min, x_max, y_max) = bbox;
+            let err = sad_rgb_rect_pyramid(&self.target_pyr, &self.current_rgba, &self.target_rgba,
+                                             self.width, x_min, y_min, x_max, y_max);
+            poly_errors.push((idx, err));
+        }
+
+        // Sort by error (highest first = most likely to have z-order issues)
+        poly_errors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Select from top percentile (e.g., 0.75 = top 25% highest-error polygons)
+        let percentile = self.cfg.smart_reorder_error_percentile;
+        let cutoff = (num_polys as f32 * percentile).ceil() as usize;
+        let candidate_pool = &poly_errors[0..cutoff.min(num_polys)];
+
+        // Pick random polygon from high-error pool
+        let pool_idx = self.rng.random_range(0..candidate_pool.len());
+        let poly_idx = candidate_pool[pool_idx].0;
+
+        let max_hops = self.cfg.smart_reorder_max_hops as usize;
+
+        let mut best_genome = self.genome.clone();
+        let mut best_fitness = self.current_fitness;
+        let mut found_improvement = false;
+
+        // Try moving up (toward end = higher z)
+        for hop in 1..=max_hops.min(num_polys - poly_idx - 1) {
+            let mut candidate = best_genome.clone();
+            candidate.polys.swap(poly_idx, poly_idx + hop);
+
+            let rgba = CpuRenderer::render_rgba_premul(&candidate);
+            let fitness = self.compute_fitness(&rgba, Some(best_fitness as u64));
+
+            if fitness < best_fitness {
+                best_genome = candidate;
+                best_fitness = fitness;
+                found_improvement = true;
+            }
+        }
+
+        // Try moving down (toward start = lower z)
+        for hop in 1..=max_hops.min(poly_idx) {
+            let mut candidate = self.genome.clone(); // Start from original
+            candidate.polys.swap(poly_idx, poly_idx - hop);
+
+            let rgba = CpuRenderer::render_rgba_premul(&candidate);
+            let fitness = self.compute_fitness(&rgba, Some(best_fitness as u64));
+
+            if fitness < best_fitness {
+                best_genome = candidate;
+                best_fitness = fitness;
+                found_improvement = true;
+            }
+        }
+
+        if found_improvement {
+            let rgba = CpuRenderer::render_rgba_premul(&best_genome);
+            Some((best_genome, rgba, best_fitness))
+        } else {
+            None
+        }
     }
 }

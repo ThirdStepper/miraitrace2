@@ -4,7 +4,7 @@ use crate::app_types::FocusRegion;
 use super::Engine;
 
 impl Engine {
-    /// Update the number of polygon points based on current polygon count (matches Evolve's progressive detail).
+    /// Update the number of polygon points based on current polygon count
     /// For dynamic mode: starts at max_vertices, reduces progressively to min_vertices.
     /// For fixed arity modes (min == max): skips entirely (no progressive reduction).
     pub(super) fn update_poly_points(&mut self) {
@@ -216,7 +216,6 @@ impl Engine {
     }
 
     /// Update autofocus region by subdividing image into grid and finding tile with highest error.
-    /// Matches Evolve's computeAutofocusFitness (widget.cpp:96-144).
     ///
     /// This adaptively concentrates evolution effort on regions with highest error,
     /// providing 2-4x additional speedup on top of rect-local optimization.
@@ -257,15 +256,60 @@ impl Engine {
         // Store for UI visualization
         self.autofocus_last_tiles = Some(tiles.clone());
 
-        // Select focus region based on strategy
+        // EMA Hotspot Sampling - Update exponential moving averages and apply weighting
+        // This concentrates mutations on persistent high-error regions
+        if !self.tile_ema_initialized {
+            // Cold start: initialize EMA with current errors
+            self.tile_ema = tiles.iter().map(|(_, err, _)| *err as f32).collect();
+            self.tile_ema_initialized = true;
+        } else {
+            // Resize if tile count changed (progressive refinement or mode switch)
+            if self.tile_ema.len() != tiles.len() {
+                self.tile_ema.resize(tiles.len(), 0.0);
+                // Reinitialize with current errors
+                for (i, (_, err, _)) in tiles.iter().enumerate() {
+                    self.tile_ema[i] = *err as f32;
+                }
+            } else {
+                // Update EMA: ema[t] = (1-β)*ema[t] + β*err_t
+                let beta = self.autofocus_ema_beta;
+                for (i, (_, err, _)) in tiles.iter().enumerate() {
+                    self.tile_ema[i] = (1.0 - beta) * self.tile_ema[i] + beta * (*err as f32);
+                }
+            }
+        }
+
+        // Build EMA-weighted tile list for selection
+        // Weight: w[t] = ε + (ema[t])^γ (larger γ = sharper focus on hotspots)
+        let gamma = self.autofocus_ema_gamma;
+        let epsilon = self.autofocus_ema_epsilon;
+
+        let mut ema_weighted_tiles: Vec<(usize, f64, FocusRegion)> = tiles.iter().enumerate()
+            .map(|(i, &(tile_idx, _raw_err, region))| {
+                let ema = self.tile_ema[i];
+                let weight = epsilon + ema.powf(gamma);
+                (tile_idx, weight as f64, region)
+            })
+            .collect();
+
+        // Sort by EMA weight (highest weight first = persistent hotspots)
+        ema_weighted_tiles.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Restrict to Top-K tiles (focus on worst hotspots only)
+        let top_k = self.autofocus_ema_top_k as usize;
+        if ema_weighted_tiles.len() > top_k {
+            ema_weighted_tiles.truncate(top_k);
+        }
+
+        // Select focus region based on strategy (using EMA-weighted tiles)
         let (selected_region, selected_indices) = if self.autofocus_probabilistic {
-            // Probabilistic: weight by error (explores more)
-            let (idx, region) = Self::select_tile_probabilistic(&tiles, &mut self.rng);
+            // Probabilistic: weight by EMA error (explores more)
+            let (idx, region) = Self::select_tile_probabilistic(&ema_weighted_tiles, &mut self.rng);
             (region, vec![idx])
         } else if self.autofocus_multi_tile_count > 1 {
-            // Multi-tile: merge top K worst tiles
+            // Multi-tile: merge top K EMA-weighted tiles
             let k = self.autofocus_multi_tile_count as usize;
-            let top_k: Vec<FocusRegion> = tiles
+            let top_k: Vec<FocusRegion> = ema_weighted_tiles
                 .iter()
                 .take(k)
                 .map(|(_, _, r)| *r)
@@ -274,8 +318,8 @@ impl Engine {
             let indices: Vec<usize> = (0..top_k.len()).collect();
             (merged_region, indices)
         } else {
-            // Single-tile deterministic: always pick worst (default)
-            let region = tiles.first().map(|(_, _, r)| *r).unwrap_or(FocusRegion::new(0.0, 1.0, 0.0, 1.0));
+            // Single-tile deterministic: always pick worst EMA-weighted tile (default)
+            let region = ema_weighted_tiles.first().map(|(_, _, r)| *r).unwrap_or(FocusRegion::new(0.0, 1.0, 0.0, 1.0));
             (region, vec![0])
         };
 

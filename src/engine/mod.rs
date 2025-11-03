@@ -52,6 +52,9 @@ impl ImprovementThrottle {
 pub struct Engine {
     pub(self) rng: Pcg32,
     pub(self) cfg: MutateConfig,
+    // Publicly accessible micro-polish settings (needed by engine_thread)
+    pub micro_polish_vertex_step: f32,
+    pub micro_polish_color_step: f32,
     pub genome: Genome,
     pub current_rgba: Vec<u8>, // premultiplied RGBA (tiny-skia's native format) - unpremul lazily for UI
     pub current_fitness: f64,  // SAD fitness (lower is better)
@@ -65,12 +68,17 @@ pub struct Engine {
     #[allow(dead_code)]
     pub(self) luma_weights_pyr_q8: Option<Vec<Vec<u16>>>,  // Weight pyramid matching target_pyr levels (reserved for future pyramid-based weighted fitness)
     pub avg_weight_q8: Option<u16>,  // Average weight (Q8.8) for fitness normalization (weighted worst-case)
+    // Edge-aware polygon seeding 
+    pub(self) edge_map: Option<crate::analysis::EdgeMap>,  // Precomputed edge map (magnitude + direction) for edge-guided spawning
     pub width: u32,            // Cached image width
     pub height: u32,           // Cached image height
     pub generation: u64,       // Generation counter (incremented during optimization)
-    pub(self) num_poly_points: usize, // Progressive detail: starts at 6, reduces to 3 (matching Evolve)
+    pub(self) num_poly_points: usize, // Progressive detail: starts at 6, reduces to 3
+    // Progressive multi-resolution evolution
+    pub(self) multi_res_stage: u8,        // Current resolution stage: 0=1/4x, 1=1/2x, 2=1x (full res)
+    pub(self) multi_res_scale_factor: f32, // Current scale factor: 0.25, 0.5, or 1.0
     pub focus_region: Option<FocusRegion>, // Optional region for targeted evolution
-    // Autofocus settings (matches Evolve's adaptive focus system)
+    // Autofocus settings
     pub autofocus_enabled: bool,     // Enable/disable autofocus (default: true)
     pub autofocus_mode: crate::settings::AutofocusMode,  // Grid type: Uniform, Quadtree, or BSP
     pub autofocus_grid_size: u32,    // NxN grid subdivision (2-16 for UniformGrid, max tiles for BSP)
@@ -79,11 +87,18 @@ pub struct Engine {
     pub autofocus_interval: u64,     // Re-evaluate focus every N generations (default: 100)
     pub autofocus_last_tiles: Option<Vec<(usize, f64, FocusRegion)>>,  // Last computed tile errors for UI visualization
     pub autofocus_selected_indices: Option<Vec<usize>>,  // Which tile indices (positions in sorted array) are actively being used
-    // Advanced autofocus (Phase 3)
+    // Advanced autofocus
     pub autofocus_multi_tile_count: u32,    // Focus on top K tiles (1 = single, 2+ = multi)
     pub autofocus_probabilistic: bool,      // Probabilistic vs. deterministic worst-first
     pub autofocus_progressive: bool,        // Progressive grid refinement
     pub gui_update_rate: u32,               // How often to update progressive params (default: 4)
+    // EMA Hotspot Sampling - always-on when autofocus enabled
+    pub(self) tile_ema: Vec<f32>,           // Per-tile exponential moving average of error
+    pub(self) tile_ema_initialized: bool,   // Cold-start flag (first autofocus pass initializes)
+    pub autofocus_ema_beta: f32,            // EMA smoothing factor (0.1 = 10% new, 90% old)
+    pub autofocus_ema_gamma: f32,           // Sharpness exponent (1.5 = emphasize hotspots)
+    pub autofocus_ema_top_k: u32,           // Top K tiles for sampling (16)
+    pub autofocus_ema_epsilon: f32,         // Floor weight (0.01 = 1% minimum)
     // UI update throttling
     pub(self) improvement_throttle: ImprovementThrottle,  // Centralized throttling for optimization callbacks
     // Resolution-Invariant Metrics
@@ -185,12 +200,26 @@ impl Engine {
             );
         }
 
-        // Save max_vertices before cfg is moved
+        // Precompute edge map for edge-aware polygon seeding (10)
+        // Uses unpremultiplied target for accurate edge detection
+        let edge_map = if cfg.edge_seeding_enabled {
+            profiling::scope!("precompute_edge_map");
+            Some(crate::analysis::compute_sobel_edges(&target_unpremul, width, height))
+        } else {
+            None
+        };
+
+        // Save values from cfg before it's moved
         let initial_poly_points = cfg.max_vertices;
+        let micro_polish_vertex_step = cfg.micro_polish_vertex_step;
+        let micro_polish_color_step = cfg.micro_polish_color_step;
+        let multi_res_enabled = cfg.multi_res_enabled;
 
         let mut this = Self {
             rng,
             cfg,
+            micro_polish_vertex_step,
+            micro_polish_color_step,
             genome,
             current_rgba,
             current_fitness,
@@ -202,10 +231,14 @@ impl Engine {
             luma_weights_q8,
             luma_weights_pyr_q8,
             avg_weight_q8,
+            edge_map,
             width,
             height,
             generation: 0,
             num_poly_points: initial_poly_points, // Start with max vertices from arity mode
+            // Multi-resolution evolution: start at 1/4x if enabled, otherwise 1x (full res)
+            multi_res_stage: if multi_res_enabled { 0 } else { 2 },
+            multi_res_scale_factor: if multi_res_enabled { 0.25 } else { 1.0 },
             focus_region: None, // Start with full image focus
             // Autofocus settings from EngineInit (no hardcoded defaults!)
             autofocus_enabled: init.autofocus_enabled,
@@ -221,6 +254,13 @@ impl Engine {
             autofocus_probabilistic: init.autofocus_probabilistic,
             autofocus_progressive: init.autofocus_progressive,
             gui_update_rate: init.gui_update_rate,
+            // EMA Hotspot Sampling - lazy init when autofocus first runs
+            tile_ema: Vec::new(),
+            tile_ema_initialized: false,
+            autofocus_ema_beta: init.autofocus_ema_beta,
+            autofocus_ema_gamma: init.autofocus_ema_gamma,
+            autofocus_ema_top_k: init.autofocus_ema_top_k,
+            autofocus_ema_epsilon: init.autofocus_ema_epsilon,
             // UI update throttling
             improvement_throttle: ImprovementThrottle::new(init.gui_update_rate),
             // Resolution-Invariant Metrics from EngineInit
@@ -324,6 +364,53 @@ impl Engine {
         self.cfg.alpha_max = alpha_max_new;
     }
 
+    /// Check and perform multi-resolution stage transitions based on SAD/px thresholds.
+    /// Transitions: 1/4x → 1/2x at 50 SAD/px, 1/2x → 1x at 15 SAD/px.
+    /// When transitioning, scales genome coordinates up to the new resolution.
+    pub(self) fn check_multi_res_transition(&mut self) {
+        if !self.cfg.multi_res_enabled || self.multi_res_stage >= 2 {
+            return;  // Already at full resolution or feature disabled
+        }
+
+        // Compute SAD per pixel from current metrics
+        let sad_per_px = self.last_metrics.sad_per_px;
+
+        // Check for transition based on current stage
+        let should_transition = match self.multi_res_stage {
+            0 => sad_per_px <= self.cfg.multi_res_stage1_threshold,  // 1/4x → 1/2x at 50 SAD/px
+            1 => sad_per_px <= self.cfg.multi_res_stage2_threshold,  // 1/2x → 1x at 15 SAD/px
+            _ => false,
+        };
+
+        if should_transition {
+            // Compute scale-up factor
+            let old_factor = self.multi_res_scale_factor;
+            let new_stage = self.multi_res_stage + 1;
+            let new_factor = match new_stage {
+                1 => 0.5,  // 1/2x
+                2 => 1.0,  // 1x (full res)
+                _ => 1.0,
+            };
+
+            let scale_ratio = new_factor / old_factor;
+
+            // Scale genome coordinates up
+            self.genome.scale_coords(scale_ratio);
+
+            // Update stage and scale factor
+            self.multi_res_stage = new_stage;
+            self.multi_res_scale_factor = new_factor;
+
+            // Re-render at new resolution
+            let rgba = CpuRenderer::render_rgba_premul(&self.genome);
+            let fitness = self.compute_fitness(&rgba, None);
+            self.update_current(rgba, fitness);
+
+            println!("Multi-res transition: stage {} → {} (scale {:.2}× → {:.2}×, SAD/px: {:.2})",
+                self.multi_res_stage - 1, self.multi_res_stage, old_factor, new_factor, sad_per_px);
+        }
+    }
+
     /// Compute full-image fitness, routing to weighted SAD if perceptual weights are enabled.
     /// This is the unified fitness function used throughout the engine.
     #[inline]
@@ -377,7 +464,7 @@ impl Engine {
         }
     }
 
-    /// One evolution step matching Evolve's run() loop (widget.cpp:276-347).
+    /// One evolution step
     /// Attempts multiple mutations per generation, evaluating independently.
     /// The update_callback is called during optimization to send incremental UI updates.
     pub fn step<F>(&mut self, update_callback: &mut F) -> bool
@@ -387,7 +474,7 @@ impl Engine {
         profiling::scope!("step");
         let polys_size = self.genome.polys.len();
 
-        // Initialize with dominant color background (matching Evolve widget.cpp:283-296)
+        // Initialize with dominant color background
         if polys_size == 0 {
             // dominant color must be computed on UNPREMULT
             let dom_color = find_dominant_color(&self.target_unpremul);
@@ -408,7 +495,7 @@ impl Engine {
             return true;
         }
 
-        // Progressive detail: adjust polygon point count based on current count (matching Evolve)
+        // Progressive detail: adjust polygon point count based on current count
         self.update_poly_points();
 
         // Progressive refinement: update autofocus parameters at GUI update rate for quick adaptation
@@ -417,9 +504,11 @@ impl Engine {
             self.update_progressive_params();
             // Also update alpha schedule if enabled (runs frequently for smooth transitions)
             self.update_alpha_schedule();
+            // Check for multi-resolution stage transitions (based on SAD/px)
+            self.check_multi_res_transition();
         }
 
-        // Autofocus: periodically re-evaluate which region has highest error (matching Evolve)
+        // Autofocus: periodically re-evaluate which region has highest error
         // This adaptively concentrates evolution effort where it's needed most
         if self.autofocus_enabled && self.generation % self.autofocus_interval == 0 {
             self.update_autofocus();
@@ -428,15 +517,26 @@ impl Engine {
         // Micro-polish: periodically run very small refinement steps on all polygons
         // This helps reduce cumulative drift from many mutations
         if self.cfg.micro_polish_enabled && self.generation > 0 && self.generation % self.cfg.micro_polish_interval == 0 {
+            let mut noop_progress = |_current: usize, _total: usize| {};
             let improved_count = self.micro_polish_pass(
                 self.cfg.micro_polish_vertex_step,
                 self.cfg.micro_polish_color_step,
                 update_callback,
+                &mut noop_progress,
             );
             // Log result (visible in console for debugging)
             if improved_count > 0 {
                 println!("Micro-polish (gen {}): improved {} / {} polygons",
                     self.generation, improved_count, self.genome.polys.len());
+            }
+        }
+
+        // Smart Reorder: periodically try local z-order optimization
+        if self.cfg.smart_reorder_enabled && self.generation > 0 && self.generation % self.cfg.smart_reorder_interval == 0 {
+            if let Some((new_genome, new_rgba, new_fitness)) = self.try_smart_reorder() {
+                self.genome = new_genome;
+                self.update_current(new_rgba, new_fitness);
+                println!("Smart reorder (gen {}): improved fitness", self.generation);
             }
         }
 
@@ -502,6 +602,18 @@ impl Engine {
 
             if self.rng.random::<f32>() < self.cfg.p_recolor {
                 if let Some((rgba, fit, dirty)) = self.recolor_poly(&mut candidate, update_callback) {
+                    out_from_opt = Some((rgba, fit, dirty));
+                }
+            }
+
+            if self.rng.random::<f32>() < self.cfg.p_transform {
+                if let Some((rgba, fit, dirty)) = self.transform_poly(&mut candidate, update_callback) {
+                    out_from_opt = Some((rgba, fit, dirty));
+                }
+            }
+
+            if self.rng.random::<f32>() < self.cfg.p_multi_vertex {
+                if let Some((rgba, fit, dirty)) = self.move_multi_vertex(&mut candidate, update_callback) {
                     out_from_opt = Some((rgba, fit, dirty));
                 }
             }

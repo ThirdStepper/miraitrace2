@@ -118,6 +118,16 @@ pub struct AppSettings {
     /// Enable progressive grid refinement (start coarse, increase as fitness improves)
     pub autofocus_progressive: bool,
 
+    // EMA Hotspot Sampling - always-on when autofocus enabled
+    /// EMA smoothing factor (0.0-1.0, e.g., 0.1 = 10% new, 90% old)
+    pub autofocus_ema_beta: f32,
+    /// EMA sharpness exponent (>1 emphasizes hotspots, e.g., 1.5)
+    pub autofocus_ema_gamma: f32,
+    /// Top-K tiles for EMA-weighted sampling (e.g., 16)
+    pub autofocus_ema_top_k: u32,
+    /// Floor weight to prevent region starvation (e.g., 0.01)
+    pub autofocus_ema_epsilon: f32,
+
     // Evolution Parameters (from MutateConfig)
     /// Step size for color optimization (larger = faster but less precise)
     pub color_step: f32,
@@ -135,6 +145,24 @@ pub struct AppSettings {
     pub p_move_point: f32,
     /// Probability of recoloring a polygon (color-only mutation) per generation
     pub p_recolor: f32,
+    /// Probability of transforming a polygon (translate + scale) per generation
+    pub p_transform: f32,
+    /// Probability of moving multiple vertices simultaneously per generation
+    pub p_multi_vertex: f32,
+
+    // Whole-Polygon Transform Parameters
+    /// Maximum translation distance for transform mutation (in pixels)
+    pub transform_translate_max: f32,
+    /// Minimum scale factor for transform mutation (e.g., 0.8 = 80%)
+    pub transform_scale_min: f32,
+    /// Maximum scale factor for transform mutation (e.g., 1.2 = 120%)
+    pub transform_scale_max: f32,
+
+    // Multi-Vertex Perturbation Parameters
+    /// Movement magnitude for multi-vertex mutations (in pixels)
+    pub multi_vertex_step: f32,
+    /// Ratio of adjacent vs non-adjacent vertex selection (0.7 = 70% adjacent)
+    pub multi_vertex_adjacent_ratio: f32,
 
     // Alpha Range
     /// Minimum alpha (opacity) for triangles (0.0 = transparent, 1.0 = opaque)
@@ -192,6 +220,22 @@ pub struct AppSettings {
     pub micro_polish_vertex_step: f32,
     /// Color step size for micro-polish (e.g., 1/255 = 0.004)
     pub micro_polish_color_step: f32,
+    /// Enable tiny-polygon cleanup during micro-polish
+    pub micro_polish_cleanup_enabled: bool,
+    /// Minimum area threshold for polygon cleanup (in square pixels, e.g., 8.0)
+    pub micro_polish_min_area_px: f32,
+    /// Fitness tolerance for cleanup (allow slight fitness loss, e.g., 0.001 = 0.1%)
+    pub micro_polish_cleanup_epsilon: f32,
+
+    // Smart Layer Reorder - Local z-order optimization
+    /// Enable smart reorder heuristic (bubble moves to optimize z-order)
+    pub smart_reorder_enabled: bool,
+    /// Maximum hops (steps up/down z-order) to test per reorder
+    pub smart_reorder_max_hops: u32,
+    /// Run smart reorder every N generations
+    pub smart_reorder_interval: u64,
+    /// Error percentile threshold for selecting polygons to reorder (0.75 = top 25%)
+    pub smart_reorder_error_percentile: f32,
 
     // Adaptive Step Sizes (Coarse → Fine)
     /// Enable adaptive step size scaling (starts coarse, becomes fine as fitness improves)
@@ -216,6 +260,28 @@ pub struct AppSettings {
     pub alpha_max_target: f32,
     /// Curve exponent for alpha schedule progression
     pub alpha_schedule_curve: f32,
+
+    // Edge-aware Polygon Seeding
+    /// Enable edge-aware seeding (spawn polygons along detected edges)
+    pub edge_seeding_enabled: bool,
+    /// Probability of using edge-guided seeding vs random (0.0-1.0, e.g., 0.7 = 70% edge, 30% random)
+    pub edge_seeding_probability: f32,
+    /// Vertex placement range along edges (in pixels, e.g., 12.0)
+    pub edge_seeding_vertex_range_px: f32,
+
+    // Progressive Multi-Resolution Evolution
+    /// Enable progressive multi-resolution evolution (opt-in feature)
+    pub multi_res_enabled: bool,
+    /// SAD/px threshold for transitioning from 1/4x to 1/2x (default: 50.0)
+    pub multi_res_stage1_threshold: f64,
+    /// SAD/px threshold for transitioning from 1/2x to 1x (default: 15.0)
+    pub multi_res_stage2_threshold: f64,
+
+    // Preview Supersampling - UI-only enhancement
+    /// Enable preview supersampling (SSAA for cleaner UI rendering)
+    pub preview_supersample_enabled: bool,
+    /// Supersample scale factor (2.0 = 2x SSAA, 4x pixel cost)
+    pub preview_supersample_scale: f32,
 }
 
 impl Default for AppSettings {
@@ -240,23 +306,40 @@ impl Default for AppSettings {
             autofocus_probabilistic: false,     // Deterministic worst-first (exploit)
             autofocus_progressive: true,        // Progressive refinement (adaptive)
 
+            // EMA Hotspot Sampling defaults - always-on when autofocus enabled
+            autofocus_ema_beta: 0.1,            // 10% new, 90% old (temporal smoothing)
+            autofocus_ema_gamma: 1.5,           // Sharpness exponent (emphasizes hotspots)
+            autofocus_ema_top_k: 16,            // Focus on top 16 tiles
+            autofocus_ema_epsilon: 0.01,        // Floor weight (1% minimum)
+
             // Evolution defaults (matching MutateConfig::default)
             color_step: 5.0 / 255.0,  // N_COLOR_VAR = 5
             pos_step: 15.0,            // N_POS_VAR = 15
 
-            // Mutation probabilities (matching original Evolve)
+            // Mutation probabilities 
             p_add: 0.20,        // 20%
             p_remove: 0.15,     // 15%
             p_reorder: 0.15,    // 15%
             p_move_point: 0.15, // 15%
             p_recolor: 0.15,    // 5% (new color-only mutation)
-            // Remainder: 20% = no mutation
+            p_transform: 0.10,  // 10% (whole-polygon translate+scale)
+            p_multi_vertex: 0.08,  // 8% (multi-vertex perturbation)
+            // Remainder: 2% = no mutation
+
+            // Whole-polygon transform parameters
+            transform_translate_max: 20.0,  // ±20 pixels translation
+            transform_scale_min: 0.8,       // 80% minimum size
+            transform_scale_max: 1.2,       // 120% maximum size
+
+            // Multi-vertex perturbation parameters
+            multi_vertex_step: 10.0,        // 10 pixels movement magnitude
+            multi_vertex_adjacent_ratio: 0.7,  // 70% adjacent, 30% non-adjacent
 
             // Alpha range (20-200 in [0,255])
             alpha_min: 20.0 / 255.0,
             alpha_max: 200.0 / 255.0,
 
-            // Triangle limits (matching original Evolve: POLYS_MIN=15000, POLYS_MAX=150000)
+            // Triangle limits
             min_tris: 15_000,
             max_tris: 150_000,
 
@@ -287,10 +370,19 @@ impl Default for AppSettings {
             },
 
             // Micro-Polish Pass (disabled by default)
-            micro_polish_enabled: true,          // Off by default (user opt-in)
+            micro_polish_enabled: false,         // Off by default (user opt-in or use Optimize button)
             micro_polish_interval: 1000,          // Every 1000 generations
             micro_polish_vertex_step: 1.0,        // 1 pixel nudges
             micro_polish_color_step: 1.0 / 255.0, // 1/255 color nudges
+            micro_polish_cleanup_enabled: true,   // Cleanup tiny polygons
+            micro_polish_min_area_px: 8.0,        // Minimum 8 square pixels
+            micro_polish_cleanup_epsilon: 0.001,  // 0.1% fitness tolerance
+
+            // Smart Layer Reorder - enabled by default
+            smart_reorder_enabled: true,          // On by default
+            smart_reorder_max_hops: 3,            // Test up to 3 positions up/down
+            smart_reorder_interval: 500,          // Every 500 generations
+            smart_reorder_error_percentile: 0.75, // Top 25% high-error polygons
 
             // Adaptive Step Sizes (disabled by default)
             adaptive_steps_enabled: true,        // Off by default (user opt-in)
@@ -305,6 +397,20 @@ impl Default for AppSettings {
             alpha_min_target: 5.0 / 255.0,        // Target: 5/255 = 0.02
             alpha_max_target: 250.0 / 255.0,      // Target: 250/255 = 0.98
             alpha_schedule_curve: 1.5,            // Curve exponent (smooth transition)
+
+            // Edge-aware Polygon Seeding - enabled by default
+            edge_seeding_enabled: true,           // On by default
+            edge_seeding_probability: 0.7,        // 70% edge-guided, 30% random (exploration)
+            edge_seeding_vertex_range_px: 12.0,   // ±12 pixels along edge directions
+
+            // Progressive Multi-Resolution Evolution - opt-in
+            multi_res_enabled: false,             // Off by default (opt-in feature)
+            multi_res_stage1_threshold: 50.0,     // 50 SAD/px: transition from 1/4x to 1/2x
+            multi_res_stage2_threshold: 15.0,     // 15 SAD/px: transition from 1/2x to 1x
+
+            // Preview Supersampling - enabled by default
+            preview_supersample_enabled: true,    // On by default (UI-only, no SVG impact)
+            preview_supersample_scale: 2.0,       // 2x SSAA (4x pixel cost, cleaner preview)
         }
     }
 }
@@ -332,6 +438,12 @@ pub struct EngineInit {
     pub autofocus_probabilistic: bool,
     pub autofocus_progressive: bool,
 
+    // EMA Hotspot Sampling
+    pub autofocus_ema_beta: f32,
+    pub autofocus_ema_gamma: f32,
+    pub autofocus_ema_top_k: u32,
+    pub autofocus_ema_epsilon: f32,
+
     // GUI settings needed by engine
     pub gui_update_rate: u32,
 
@@ -352,6 +464,10 @@ impl From<&AppSettings> for EngineInit {
             autofocus_multi_tile_count: settings.autofocus_multi_tile_count,
             autofocus_probabilistic: settings.autofocus_probabilistic,
             autofocus_progressive: settings.autofocus_progressive,
+            autofocus_ema_beta: settings.autofocus_ema_beta,
+            autofocus_ema_gamma: settings.autofocus_ema_gamma,
+            autofocus_ema_top_k: settings.autofocus_ema_top_k,
+            autofocus_ema_epsilon: settings.autofocus_ema_epsilon,
             gui_update_rate: settings.gui_update_rate,
             metrics_settings: settings.metrics_settings,
             termination_settings: settings.termination_settings,
@@ -372,6 +488,10 @@ pub struct AutofocusPack {
     pub multi_tile_count: u32,
     pub probabilistic: bool,
     pub progressive: bool,
+    pub ema_beta: f32,
+    pub ema_gamma: f32,
+    pub ema_top_k: u32,
+    pub ema_epsilon: f32,
     pub gui_update_rate: u32,
 }
 
@@ -387,6 +507,10 @@ impl From<&AppSettings> for AutofocusPack {
             multi_tile_count: settings.autofocus_multi_tile_count,
             probabilistic: settings.autofocus_probabilistic,
             progressive: settings.autofocus_progressive,
+            ema_beta: settings.autofocus_ema_beta,
+            ema_gamma: settings.autofocus_ema_gamma,
+            ema_top_k: settings.autofocus_ema_top_k,
+            ema_epsilon: settings.autofocus_ema_epsilon,
             gui_update_rate: settings.gui_update_rate,
         }
     }
@@ -428,7 +552,14 @@ impl AppSettings {
             p_reorder: self.p_reorder,
             p_move_point: self.p_move_point,
             p_recolor: self.p_recolor,
+            p_transform: self.p_transform,
+            p_multi_vertex: self.p_multi_vertex,
             pos_sigma: 10.0,  // Not exposed in UI (random mutations)
+            transform_translate_max: self.transform_translate_max,
+            transform_scale_min: self.transform_scale_min,
+            transform_scale_max: self.transform_scale_max,
+            multi_vertex_step: self.multi_vertex_step,
+            multi_vertex_adjacent_ratio: self.multi_vertex_adjacent_ratio,
             color_step: self.color_step,
             pos_step: self.pos_step,
             min_tris: self.min_tris,
@@ -447,6 +578,13 @@ impl AppSettings {
             micro_polish_interval: self.micro_polish_interval,
             micro_polish_vertex_step: self.micro_polish_vertex_step,
             micro_polish_color_step: self.micro_polish_color_step,
+            micro_polish_cleanup_enabled: self.micro_polish_cleanup_enabled,
+            micro_polish_min_area_px: self.micro_polish_min_area_px,
+            micro_polish_cleanup_epsilon: self.micro_polish_cleanup_epsilon,
+            smart_reorder_enabled: self.smart_reorder_enabled,
+            smart_reorder_max_hops: self.smart_reorder_max_hops,
+            smart_reorder_interval: self.smart_reorder_interval,
+            smart_reorder_error_percentile: self.smart_reorder_error_percentile,
             adaptive_steps_enabled: self.adaptive_steps_enabled,
             step_scale_min: self.step_scale_min,
             step_scale_max: self.step_scale_max,
@@ -457,6 +595,12 @@ impl AppSettings {
             alpha_min_target: self.alpha_min_target,
             alpha_max_target: self.alpha_max_target,
             alpha_schedule_curve: self.alpha_schedule_curve,
+            edge_seeding_enabled: self.edge_seeding_enabled,
+            edge_seeding_probability: self.edge_seeding_probability,
+            edge_seeding_vertex_range_px: self.edge_seeding_vertex_range_px,
+            multi_res_enabled: self.multi_res_enabled,
+            multi_res_stage1_threshold: self.multi_res_stage1_threshold,
+            multi_res_stage2_threshold: self.multi_res_stage2_threshold,
         }
     }
 }

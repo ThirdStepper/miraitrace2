@@ -61,6 +61,21 @@ impl FocusRegion {
     }
 }
 
+// Optimization phase for progress tracking
+#[derive(Clone, Copy, Debug)]
+pub enum OptimizationPhase {
+    Recoloring,
+    MicroPolishing,
+}
+
+// Optimization progress for UI display
+#[derive(Clone, Copy, Debug)]
+pub struct OptimizationProgress {
+    pub current: usize,
+    pub total: usize,
+    pub phase: OptimizationPhase,
+}
+
 // messages from UI to engine thread
 pub enum EngineCommand {
     Start,
@@ -69,7 +84,7 @@ pub enum EngineCommand {
     SetFocusRegion(Option<FocusRegion>),
     UpdateAutofocusSettings(crate::settings::AutofocusPack),
     TriggerAutofocus, // force immediate autofocus update
-    RecolorAll,       // re-optimize colors on all polygons (global refinement pass)
+    OptimizeAll,      // combined recolor + micro-polish with progress tracking
 }
 
 // messages from engine thread to UI
@@ -84,4 +99,5 @@ pub struct EngineUpdate {
     pub metrics: crate::fitness::MetricsSnapshot,  // resolution-invariant metrics (PSNR, SAD/px)
     pub weighted_sad: Option<f64>,  // Raw weighted SAD value (only present when perceptual weighting enabled)
     pub perceptual_k: Option<u16>,  // k value if perceptual weighting enabled (for display)
+    pub optimization_progress: Option<OptimizationProgress>,  // progress during OptimizeAll operation
 }
