@@ -97,6 +97,20 @@ pub fn render_toolbar(
                         let _ = tx.send(EngineCommand::OptimizeAll);
                     }
                 }
+
+                // Split polygons button
+                if ui.button("✂ Split polygons").on_hover_text("Split high-error polygons crossing color boundaries").clicked() {
+                    if let Some(tx) = command_tx {
+                        let _ = tx.send(EngineCommand::SplitPolygons);
+                    }
+                }
+
+                // Merge polygons button
+                if ui.button("🔗 Merge polygons").on_hover_text("Merge adjacent polygons with similar colors").clicked() {
+                    if let Some(tx) = command_tx {
+                        let _ = tx.send(EngineCommand::MergePolygons);
+                    }
+                }
             });
 
             ui.separator();

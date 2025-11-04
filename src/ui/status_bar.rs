@@ -92,11 +92,13 @@ pub fn render_status_bar(
 
             ui.separator();
 
-            // Optimization progress bar (when running OptimizeAll)
+            // Optimization progress bar (when running OptimizeAll/Split/Merge)
             if let Some(progress) = optimization_progress {
                 let phase_name = match progress.phase {
                     crate::app_types::OptimizationPhase::Recoloring => "Recoloring",
                     crate::app_types::OptimizationPhase::MicroPolishing => "Micro-polishing",
+                    crate::app_types::OptimizationPhase::Splitting => "Splitting",
+                    crate::app_types::OptimizationPhase::Merging => "Merging",
                 };
 
                 let percent = if progress.total > 0 {

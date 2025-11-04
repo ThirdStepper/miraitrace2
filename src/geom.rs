@@ -220,3 +220,159 @@ mod tests {
 pub fn polygon_area(points: &[(f32, f32)]) -> f32 {
     signed_area(points).abs()
 }
+
+/// Compute the convex hull of a set of points using Graham scan algorithm.
+/// Returns points in CCW order forming the convex hull.
+/// Returns empty vec if input has fewer than 3 points.
+pub fn convex_hull(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+
+    // Find the point with lowest y-coordinate (leftmost if tie)
+    let mut lowest_idx = 0;
+    for i in 1..points.len() {
+        if points[i].1 < points[lowest_idx].1
+            || (points[i].1 == points[lowest_idx].1 && points[i].0 < points[lowest_idx].0) {
+            lowest_idx = i;
+        }
+    }
+
+    let pivot = points[lowest_idx];
+
+    // Sort points by polar angle with respect to pivot
+    let mut sorted: Vec<(f32, f32)> = points.iter()
+        .filter(|&&p| p != pivot)
+        .copied()
+        .collect();
+
+    sorted.sort_by(|a, b| {
+        // Compute cross product to determine angle order
+        let cross = (a.0 - pivot.0) * (b.1 - pivot.1) - (a.1 - pivot.1) * (b.0 - pivot.0);
+        if cross.abs() < 1e-9 {
+            // Collinear - sort by distance
+            let dist_a = (a.0 - pivot.0).powi(2) + (a.1 - pivot.1).powi(2);
+            let dist_b = (b.0 - pivot.0).powi(2) + (b.1 - pivot.1).powi(2);
+            dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
+        } else if cross > 0.0 {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        }
+    });
+
+    // Graham scan
+    let mut hull = Vec::new();
+    hull.push(pivot);
+
+    for &p in &sorted {
+        // Remove points that would make a right turn
+        while hull.len() >= 2 {
+            let p1 = hull[hull.len() - 2];
+            let p2 = hull[hull.len() - 1];
+            let cross = (p2.0 - p1.0) * (p.1 - p1.1) - (p2.1 - p1.1) * (p.0 - p1.0);
+            if cross <= 0.0 {
+                hull.pop();
+            } else {
+                break;
+            }
+        }
+        hull.push(p);
+    }
+
+    hull
+}
+
+/// Check if two polygons share an edge or are adjacent (within epsilon tolerance).
+/// Returns true if they have overlapping edges or are very close.
+pub fn polygons_share_edge(poly1: &[(f32, f32)], poly2: &[(f32, f32)], epsilon: f32) -> bool {
+    // Quick AABB rejection test
+    let (min1_x, max1_x, min1_y, max1_y) = {
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        for &(x, y) in poly1 {
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+        (min_x, max_x, min_y, max_y)
+    };
+
+    let (min2_x, max2_x, min2_y, max2_y) = {
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        for &(x, y) in poly2 {
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+        (min_x, max_x, min_y, max_y)
+    };
+
+    // Check if AABBs overlap (with epsilon margin)
+    if max1_x + epsilon < min2_x || max2_x + epsilon < min1_x
+        || max1_y + epsilon < min2_y || max2_y + epsilon < min1_y {
+        return false;
+    }
+
+    // Check for shared vertices
+    for &v1 in poly1 {
+        for &v2 in poly2 {
+            let dist_sq = (v1.0 - v2.0).powi(2) + (v1.1 - v2.1).powi(2);
+            if dist_sq < epsilon * epsilon {
+                return true;
+            }
+        }
+    }
+
+    // Check for edge proximity (vertex from one polygon near edge of another)
+    let point_near_segment = |p: (f32, f32), a: (f32, f32), b: (f32, f32)| -> bool {
+        // Compute distance from point p to line segment ab
+        let ab_x = b.0 - a.0;
+        let ab_y = b.1 - a.1;
+        let ap_x = p.0 - a.0;
+        let ap_y = p.1 - a.1;
+
+        let ab_len_sq = ab_x * ab_x + ab_y * ab_y;
+        if ab_len_sq < 1e-9 {
+            // Degenerate segment
+            let dist_sq = ap_x * ap_x + ap_y * ap_y;
+            return dist_sq < epsilon * epsilon;
+        }
+
+        let t = ((ap_x * ab_x + ap_y * ab_y) / ab_len_sq).clamp(0.0, 1.0);
+        let proj_x = a.0 + t * ab_x;
+        let proj_y = a.1 + t * ab_y;
+        let dist_sq = (p.0 - proj_x).powi(2) + (p.1 - proj_y).powi(2);
+
+        dist_sq < epsilon * epsilon
+    };
+
+    // Check if any vertex of poly1 is near any edge of poly2
+    for &v in poly1 {
+        for i in 0..poly2.len() {
+            let j = (i + 1) % poly2.len();
+            if point_near_segment(v, poly2[i], poly2[j]) {
+                return true;
+            }
+        }
+    }
+
+    // Check if any vertex of poly2 is near any edge of poly1
+    for &v in poly2 {
+        for i in 0..poly1.len() {
+            let j = (i + 1) % poly1.len();
+            if point_near_segment(v, poly1[i], poly1[j]) {
+                return true;
+            }
+        }
+    }
+
+    false
+}

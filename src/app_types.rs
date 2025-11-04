@@ -66,6 +66,8 @@ impl FocusRegion {
 pub enum OptimizationPhase {
     Recoloring,
     MicroPolishing,
+    Splitting,
+    Merging,
 }
 
 // Optimization progress for UI display
@@ -85,6 +87,8 @@ pub enum EngineCommand {
     UpdateAutofocusSettings(crate::settings::AutofocusPack),
     TriggerAutofocus, // force immediate autofocus update
     OptimizeAll,      // combined recolor + micro-polish with progress tracking
+    SplitPolygons,    // split high-error polygons crossing color boundaries
+    MergePolygons,    // merge adjacent similar-colored polygons
 }
 
 // messages from engine thread to UI

@@ -243,6 +243,198 @@ pub fn load_target_image(
                                     recolor_improved, engine.genome.polys.len(),
                                     polish_improved, engine.genome.polys.len());
                             }
+                            EngineCommand::SplitPolygons => {
+                                // Split high-error polygons crossing color boundaries
+                                let update_tx_clone = update_tx.clone();
+                                let ctx_clone_inner = ctx_clone.clone();
+                                let baseline = engine.baseline_fitness;
+                                let current_generation = engine.generation;
+                                let img_width = engine.width;
+                                let img_height = engine.height;
+                                let psnr_peak = engine.metrics_settings.psnr_peak;
+                                let avg_weight = engine.avg_weight_q8;
+                                let perceptual_k = engine.perceptual_k_q8();
+
+                                let mut update_callback = |_genome: &crate::dna::Genome, rgba: &[u8], fitness_val: f64, _improved: bool| {
+                                    let fitness_percent = crate::engine::Engine::fitness_percent_from_baseline(
+                                        baseline,
+                                        fitness_val,
+                                    );
+
+                                    let sad = fitness_val;
+                                    let num_px = (img_width as usize) * (img_height as usize);
+                                    let metrics = if avg_weight.is_some() {
+                                        crate::fitness::MetricsSnapshot::from_sad_weighted_normalized(
+                                            sad,
+                                            num_px,
+                                            avg_weight,
+                                            psnr_peak as f32,
+                                        )
+                                    } else {
+                                        crate::fitness::MetricsSnapshot::from_sad(
+                                            sad,
+                                            num_px,
+                                            psnr_peak as f32,
+                                        )
+                                    };
+
+                                    let _ = update_tx_clone.send(EngineUpdate {
+                                        current_rgba: Arc::from(rgba),
+                                        generation: current_generation,
+                                        fitness: fitness_percent,
+                                        triangles: _genome.polys.len(),
+                                        autofocus_tiles: None,
+                                        focus_region: None,
+                                        focus_tile_indices: None,
+                                        metrics,
+                                        weighted_sad: avg_weight.map(|_| fitness_val),
+                                        perceptual_k,
+                                        optimization_progress: None,
+                                    });
+                                    ctx_clone_inner.request_repaint();
+                                };
+
+                                // Progress callback for split operation
+                                let update_tx_progress = update_tx.clone();
+                                let ctx_progress = ctx_clone.clone();
+                                let mut split_progress = |current: usize, total: usize| {
+                                    let _ = update_tx_progress.send(EngineUpdate {
+                                        current_rgba: Arc::from(&[][..]),
+                                        generation: 0,
+                                        fitness: 0.0,
+                                        triangles: 0,
+                                        autofocus_tiles: None,
+                                        focus_region: None,
+                                        focus_tile_indices: None,
+                                        metrics: crate::fitness::MetricsSnapshot::default(),
+                                        weighted_sad: None,
+                                        perceptual_k: None,
+                                        optimization_progress: Some(crate::app_types::OptimizationProgress {
+                                            current,
+                                            total,
+                                            phase: crate::app_types::OptimizationPhase::Splitting,
+                                        }),
+                                    });
+                                    ctx_progress.request_repaint();
+                                };
+
+                                let num_splits = engine.split_pass(&mut update_callback, &mut split_progress);
+
+                                // Send final update (clear progress)
+                                let _ = update_tx.send(EngineUpdate {
+                                    current_rgba: Arc::from(engine.current_rgba.as_slice()),
+                                    generation: engine.generation,
+                                    fitness: engine.fitness_percent_normalized(),
+                                    triangles: engine.genome.polys.len(),
+                                    autofocus_tiles: None,
+                                    focus_region: engine.focus_region,
+                                    focus_tile_indices: None,
+                                    metrics: engine.last_metrics,
+                                    weighted_sad: engine.avg_weight_q8.map(|_| engine.current_fitness),
+                                    perceptual_k: engine.perceptual_k_q8(),
+                                    optimization_progress: None,
+                                });
+                                ctx_clone.request_repaint();
+
+                                // Log result
+                                println!("Split operation complete: {} polygons split", num_splits);
+                            }
+                            EngineCommand::MergePolygons => {
+                                // Merge adjacent similar-colored polygons
+                                let update_tx_clone = update_tx.clone();
+                                let ctx_clone_inner = ctx_clone.clone();
+                                let baseline = engine.baseline_fitness;
+                                let current_generation = engine.generation;
+                                let img_width = engine.width;
+                                let img_height = engine.height;
+                                let psnr_peak = engine.metrics_settings.psnr_peak;
+                                let avg_weight = engine.avg_weight_q8;
+                                let perceptual_k = engine.perceptual_k_q8();
+
+                                let mut update_callback = |_genome: &crate::dna::Genome, rgba: &[u8], fitness_val: f64, _improved: bool| {
+                                    let fitness_percent = crate::engine::Engine::fitness_percent_from_baseline(
+                                        baseline,
+                                        fitness_val,
+                                    );
+
+                                    let sad = fitness_val;
+                                    let num_px = (img_width as usize) * (img_height as usize);
+                                    let metrics = if avg_weight.is_some() {
+                                        crate::fitness::MetricsSnapshot::from_sad_weighted_normalized(
+                                            sad,
+                                            num_px,
+                                            avg_weight,
+                                            psnr_peak as f32,
+                                        )
+                                    } else {
+                                        crate::fitness::MetricsSnapshot::from_sad(
+                                            sad,
+                                            num_px,
+                                            psnr_peak as f32,
+                                        )
+                                    };
+
+                                    let _ = update_tx_clone.send(EngineUpdate {
+                                        current_rgba: Arc::from(rgba),
+                                        generation: current_generation,
+                                        fitness: fitness_percent,
+                                        triangles: _genome.polys.len(),
+                                        autofocus_tiles: None,
+                                        focus_region: None,
+                                        focus_tile_indices: None,
+                                        metrics,
+                                        weighted_sad: avg_weight.map(|_| fitness_val),
+                                        perceptual_k,
+                                        optimization_progress: None,
+                                    });
+                                    ctx_clone_inner.request_repaint();
+                                };
+
+                                // Progress callback for merge operation
+                                let update_tx_progress = update_tx.clone();
+                                let ctx_progress = ctx_clone.clone();
+                                let mut merge_progress = |current: usize, total: usize| {
+                                    let _ = update_tx_progress.send(EngineUpdate {
+                                        current_rgba: Arc::from(&[][..]),
+                                        generation: 0,
+                                        fitness: 0.0,
+                                        triangles: 0,
+                                        autofocus_tiles: None,
+                                        focus_region: None,
+                                        focus_tile_indices: None,
+                                        metrics: crate::fitness::MetricsSnapshot::default(),
+                                        weighted_sad: None,
+                                        perceptual_k: None,
+                                        optimization_progress: Some(crate::app_types::OptimizationProgress {
+                                            current,
+                                            total,
+                                            phase: crate::app_types::OptimizationPhase::Merging,
+                                        }),
+                                    });
+                                    ctx_progress.request_repaint();
+                                };
+
+                                let num_merges = engine.merge_pass(&mut update_callback, &mut merge_progress);
+
+                                // Send final update (clear progress)
+                                let _ = update_tx.send(EngineUpdate {
+                                    current_rgba: Arc::from(engine.current_rgba.as_slice()),
+                                    generation: engine.generation,
+                                    fitness: engine.fitness_percent_normalized(),
+                                    triangles: engine.genome.polys.len(),
+                                    autofocus_tiles: None,
+                                    focus_region: engine.focus_region,
+                                    focus_tile_indices: None,
+                                    metrics: engine.last_metrics,
+                                    weighted_sad: engine.avg_weight_q8.map(|_| engine.current_fitness),
+                                    perceptual_k: engine.perceptual_k_q8(),
+                                    optimization_progress: None,
+                                });
+                                ctx_clone.request_repaint();
+
+                                // Log result
+                                println!("Merge operation complete: {} polygon pairs merged", num_merges);
+                            }
                         }
                     }
 

@@ -532,4 +532,373 @@ impl Engine {
             None
         }
     }
+
+    /// Try to split a polygon with high error variance.
+    /// Detects high-error polygons and attempts to split them across color boundaries.
+    /// Returns Some((new_genome, rgba, fitness)) if split improves fitness, None otherwise.
+    pub(super) fn try_split_polygon(&mut self, poly_idx: usize) -> Option<(Genome, Vec<u8>, f64)> {
+        profiling::scope!("try_split_polygon");
+
+        if poly_idx >= self.genome.polys.len() {
+            return None;
+        }
+
+        let poly = &self.genome.polys[poly_idx];
+        let num_points = poly.points.len();
+
+        if num_points < 4 {
+            // Can't split polygons with fewer than 4 vertices
+            return None;
+        }
+
+        // Strategy: Try splitting along different chords (lines between non-adjacent vertices)
+        // Pick the split that best separates high-error from low-error regions
+
+        // Compute per-vertex error contribution (approximation: use color sampling)
+        let mut best_split: Option<(Vec<(f32, f32)>, Vec<(f32, f32)>)> = None;
+        let mut best_split_fitness = self.current_fitness;
+
+        // Try all possible chords (non-adjacent vertex pairs)
+        for i in 0..num_points {
+            for j in (i + 2)..(num_points - 1).min(i + num_points - 1) {
+                let j = j % num_points;
+
+                // Skip adjacent vertices
+                if (j + num_points - i) % num_points <= 1 || (i + num_points - j) % num_points <= 1 {
+                    continue;
+                }
+
+                // Split polygon into two parts along chord i-j
+                let mut part1 = Vec::new();
+                let mut part2 = Vec::new();
+
+                // Collect vertices for part1 (from i to j)
+                let mut idx = i;
+                loop {
+                    part1.push(poly.points[idx]);
+                    if idx == j {
+                        break;
+                    }
+                    idx = (idx + 1) % num_points;
+                }
+
+                // Collect vertices for part2 (from j to i)
+                idx = j;
+                loop {
+                    part2.push(poly.points[idx]);
+                    if idx == i {
+                        break;
+                    }
+                    idx = (idx + 1) % num_points;
+                }
+
+                // Validate both parts are convex and simple
+                if !crate::geom::sanitize_ccw_simple_convex(&mut part1) {
+                    continue;
+                }
+                if !crate::geom::sanitize_ccw_simple_convex(&mut part2) {
+                    continue;
+                }
+
+                // Skip degenerate splits
+                if part1.len() < 3 || part2.len() < 3 {
+                    continue;
+                }
+
+                // Create two new polygons
+                let mut candidate = self.genome.clone();
+                candidate.polys.remove(poly_idx);  // Remove original
+
+                let poly1 = crate::dna::Polygon {
+                    points: part1.clone(),
+                    rgba: poly.rgba,  // Start with same color
+                    cached_path: std::sync::OnceLock::new(),
+                };
+
+                let poly2 = crate::dna::Polygon {
+                    points: part2.clone(),
+                    rgba: poly.rgba,  // Start with same color
+                    cached_path: std::sync::OnceLock::new(),
+                };
+
+                // Insert new polygons at the same z-index
+                candidate.polys.insert(poly_idx, Arc::new(poly1));
+                candidate.polys.insert(poly_idx + 1, Arc::new(poly2));
+
+                // Evaluate fitness
+                let rgba = CpuRenderer::render_rgba_premul(&candidate);
+                let fitness = self.compute_fitness(&rgba, Some(best_split_fitness as u64));
+
+                if fitness < best_split_fitness {
+                    best_split = Some((part1, part2));
+                    best_split_fitness = fitness;
+                }
+            }
+        }
+
+        // If we found a good split, optimize both parts and return
+        if let Some((part1, part2)) = best_split {
+            let mut candidate = self.genome.clone();
+            candidate.polys.remove(poly_idx);
+
+            let poly1 = crate::dna::Polygon {
+                points: part1,
+                rgba: self.genome.polys[poly_idx].rgba,
+                cached_path: std::sync::OnceLock::new(),
+            };
+
+            let poly2 = crate::dna::Polygon {
+                points: part2,
+                rgba: self.genome.polys[poly_idx].rgba,
+                cached_path: std::sync::OnceLock::new(),
+            };
+
+            candidate.polys.insert(poly_idx, Arc::new(poly1));
+            candidate.polys.insert(poly_idx + 1, Arc::new(poly2));
+
+            // Optimize both new polygons
+            let mut dummy_callback = |_: &Genome, _: &[u8], _: f64, _: bool| {};
+            let (opt1, _rgba1, _fit1, _) = self.optimize_colors_fast(&candidate, poly_idx, &mut dummy_callback);
+            candidate = opt1;
+            let (opt2, _rgba2, _fit2, _) = self.optimize_shape_fast(&candidate, poly_idx, &mut dummy_callback);
+            candidate = opt2;
+
+            let (opt3, _rgba3, _fit3, _) = self.optimize_colors_fast(&candidate, poly_idx + 1, &mut dummy_callback);
+            candidate = opt3;
+            let (opt4, _rgba4, _fit4, _) = self.optimize_shape_fast(&candidate, poly_idx + 1, &mut dummy_callback);
+            candidate = opt4;
+
+            let final_rgba = CpuRenderer::render_rgba_premul(&candidate);
+            let final_fitness = self.compute_fitness(&final_rgba, Some(self.current_fitness as u64));
+
+            if final_fitness < self.current_fitness {
+                return Some((candidate, final_rgba, final_fitness));
+            }
+        }
+
+        None
+    }
+
+    /// Batch split operation: attempt to split high-error polygons.
+    /// Returns the number of successful splits.
+    pub fn split_pass<F, P>(
+        &mut self,
+        _update_callback: &mut F,
+        progress_callback: &mut P,
+    ) -> usize
+    where
+        F: FnMut(&Genome, &[u8], f64, bool),
+        P: FnMut(usize, usize),
+    {
+        profiling::scope!("split_pass");
+        let mut num_splits = 0;
+
+        // Compute error variance for each polygon
+        let mut poly_errors: Vec<(usize, f64)> = Vec::new();
+        for idx in 0..self.genome.polys.len() {
+            let bbox = poly_bounds_aa(&self.genome.polys[idx], self.width, self.height);
+            let (x_min, y_min, x_max, y_max) = bbox;
+            let err = sad_rgb_rect_pyramid(&self.target_pyr, &self.current_rgba, &self.target_rgba,
+                                             self.width, x_min, y_min, x_max, y_max);
+            poly_errors.push((idx, err));
+        }
+
+        // Sort by error (highest first)
+        poly_errors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Attempt splits on top 20% of high-error polygons
+        let num_candidates = (poly_errors.len() as f32 * 0.2).ceil() as usize;
+        let candidates = &poly_errors[0..num_candidates.min(poly_errors.len())];
+
+        let total = candidates.len();
+        for (processed, &(idx, _)) in candidates.iter().enumerate() {
+            // Adjust index for previous splits (each split adds one polygon)
+            let adjusted_idx = idx + num_splits;
+
+            if let Some((new_genome, new_rgba, new_fitness)) = self.try_split_polygon(adjusted_idx) {
+                self.genome = new_genome;
+                self.update_current(new_rgba, new_fitness);
+                num_splits += 1;
+            }
+
+            progress_callback(processed + 1, total);
+        }
+
+        num_splits
+    }
+
+    /// Try to merge two adjacent polygons with similar colors.
+    /// Returns Some((merged_genome, rgba, fitness)) if merge is beneficial, None otherwise.
+    pub(super) fn try_merge_polygons(&mut self, idx1: usize, idx2: usize) -> Option<(Genome, Vec<u8>, f64)> {
+        profiling::scope!("try_merge_polygons");
+
+        if idx1 >= self.genome.polys.len() || idx2 >= self.genome.polys.len() || idx1 == idx2 {
+            return None;
+        }
+
+        let poly1 = &self.genome.polys[idx1];
+        let poly2 = &self.genome.polys[idx2];
+
+        // Check color similarity (Euclidean distance in RGBA space)
+        let color_delta = (
+            (poly1.rgba[0] - poly2.rgba[0]).powi(2) +
+            (poly1.rgba[1] - poly2.rgba[1]).powi(2) +
+            (poly1.rgba[2] - poly2.rgba[2]).powi(2) +
+            (poly1.rgba[3] - poly2.rgba[3]).powi(2)
+        ).sqrt();
+
+        const COLOR_THRESHOLD: f32 = 0.1;  // ~25/255 per channel on average
+        if color_delta > COLOR_THRESHOLD {
+            return None;  // Colors too different
+        }
+
+        // Check adjacency
+        const ADJACENCY_EPSILON: f32 = 5.0;  // 5 pixels
+        if !crate::geom::polygons_share_edge(&poly1.points, &poly2.points, ADJACENCY_EPSILON) {
+            return None;  // Not adjacent
+        }
+
+        // Merge polygons by computing convex hull
+        let mut combined_points = Vec::new();
+        combined_points.extend_from_slice(&poly1.points);
+        combined_points.extend_from_slice(&poly2.points);
+
+        let mut hull_points = crate::geom::convex_hull(&combined_points);
+
+        // Validate the hull
+        if !crate::geom::sanitize_ccw_simple_convex(&mut hull_points) {
+            return None;  // Invalid hull
+        }
+
+        if hull_points.len() < 3 || hull_points.len() > 6 {
+            return None;  // Too few or too many vertices
+        }
+
+        // Average the colors
+        let merged_rgba = [
+            (poly1.rgba[0] + poly2.rgba[0]) / 2.0,
+            (poly1.rgba[1] + poly2.rgba[1]) / 2.0,
+            (poly1.rgba[2] + poly2.rgba[2]) / 2.0,
+            (poly1.rgba[3] + poly2.rgba[3]) / 2.0,
+        ];
+
+        // Create merged polygon
+        let merged_poly = crate::dna::Polygon {
+            points: hull_points,
+            rgba: merged_rgba,
+            cached_path: std::sync::OnceLock::new(),
+        };
+
+        // Create candidate genome
+        let mut candidate = self.genome.clone();
+        let (remove_first, remove_second) = if idx1 < idx2 { (idx2, idx1) } else { (idx1, idx2) };
+        candidate.polys.remove(remove_first);  // Remove higher index first
+        candidate.polys.remove(remove_second);
+        candidate.polys.insert(remove_second, Arc::new(merged_poly));  // Insert at lower index
+
+        // Evaluate fitness
+        let rgba = CpuRenderer::render_rgba_premul(&candidate);
+        let fitness = self.compute_fitness(&rgba, Some(self.current_fitness as u64));
+
+        // Allow small fitness degradation (0.1%) to reduce polygon count
+        const MERGE_EPSILON: f64 = 0.001;
+        let max_allowed_fitness = self.current_fitness * (1.0 + MERGE_EPSILON);
+
+        if fitness <= max_allowed_fitness {
+            // Optimize the merged polygon
+            let mut dummy_callback = |_: &Genome, _: &[u8], _: f64, _: bool| {};
+            let (opt1, _rgba1, _fit1, _) = self.optimize_colors_fast(&candidate, remove_second, &mut dummy_callback);
+            candidate = opt1;
+            let (opt2, _rgba2, _fit2, _) = self.optimize_shape_fast(&candidate, remove_second, &mut dummy_callback);
+
+            let final_rgba = CpuRenderer::render_rgba_premul(&opt2);
+            let final_fitness = self.compute_fitness(&final_rgba, Some(self.current_fitness as u64));
+
+            if final_fitness <= max_allowed_fitness {
+                return Some((opt2, final_rgba, final_fitness));
+            }
+        }
+
+        None
+    }
+
+    /// Batch merge operation: attempt to merge adjacent similar-colored polygons.
+    /// Returns the number of successful merges.
+    pub fn merge_pass<F, P>(
+        &mut self,
+        _update_callback: &mut F,
+        progress_callback: &mut P,
+    ) -> usize
+    where
+        F: FnMut(&Genome, &[u8], f64, bool),
+        P: FnMut(usize, usize),
+    {
+        profiling::scope!("merge_pass");
+        let mut num_merges = 0;
+
+        // Build list of adjacent polygon pairs with similar colors
+        let mut merge_candidates: Vec<(usize, usize, f32)> = Vec::new();
+
+        for i in 0..self.genome.polys.len() {
+            for j in (i + 1)..self.genome.polys.len() {
+                let poly1 = &self.genome.polys[i];
+                let poly2 = &self.genome.polys[j];
+
+                // Check color similarity
+                let color_delta = (
+                    (poly1.rgba[0] - poly2.rgba[0]).powi(2) +
+                    (poly1.rgba[1] - poly2.rgba[1]).powi(2) +
+                    (poly1.rgba[2] - poly2.rgba[2]).powi(2) +
+                    (poly1.rgba[3] - poly2.rgba[3]).powi(2)
+                ).sqrt();
+
+                const COLOR_THRESHOLD: f32 = 0.1;
+                if color_delta > COLOR_THRESHOLD {
+                    continue;
+                }
+
+                // Check adjacency
+                const ADJACENCY_EPSILON: f32 = 5.0;
+                if crate::geom::polygons_share_edge(&poly1.points, &poly2.points, ADJACENCY_EPSILON) {
+                    merge_candidates.push((i, j, color_delta));
+                }
+            }
+        }
+
+        // Sort by color similarity (most similar first)
+        merge_candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Limit to top 100 candidates to avoid excessive merging
+        let candidates = &merge_candidates[0..merge_candidates.len().min(100)];
+        let total = candidates.len();
+
+        // Track which polygons have been merged to avoid double-merging
+        let mut merged_indices = std::collections::HashSet::new();
+
+        for (processed, &(idx1, idx2, _)) in candidates.iter().enumerate() {
+            // Skip if either polygon was already merged
+            if merged_indices.contains(&idx1) || merged_indices.contains(&idx2) {
+                progress_callback(processed + 1, total);
+                continue;
+            }
+
+            // Adjust indices for previous merges
+            let adjustment1 = merged_indices.iter().filter(|&&i| i < idx1).count();
+            let adjustment2 = merged_indices.iter().filter(|&&i| i < idx2).count();
+            let adjusted_idx1 = idx1 - adjustment1;
+            let adjusted_idx2 = idx2 - adjustment2;
+
+            if let Some((new_genome, new_rgba, new_fitness)) = self.try_merge_polygons(adjusted_idx1, adjusted_idx2) {
+                self.genome = new_genome;
+                self.update_current(new_rgba, new_fitness);
+                merged_indices.insert(idx1);
+                merged_indices.insert(idx2);
+                num_merges += 1;
+            }
+
+            progress_callback(processed + 1, total);
+        }
+
+        num_merges
+    }
 }
