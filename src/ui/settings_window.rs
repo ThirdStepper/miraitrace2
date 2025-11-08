@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use crate::app_types::EngineCommand;
 use crate::settings::AppSettings;
 
-/// Show the settings window with configurable parameters
+/// show the settings window with configurable parameters
 pub fn show_settings_window(
     ctx: &egui::Context,
     show_settings: &mut bool,
@@ -17,13 +17,13 @@ pub fn show_settings_window(
         .resizable(true)
         .default_width(450.0)
         .show(ctx, |ui| {
-            // Apply, Save, and Reset buttons at the top
+            // apply, save, and reset buttons at the top
             ui.horizontal(|ui| {
                 if ui.button("Apply Settings").on_hover_text("Apply changes to current session").clicked() {
-                    // Apply settings to global state immediately (AA only)
+                    // apply settings to global state immediately (aa only)
                     crate::render::set_polygon_antialiasing(settings.polygon_antialiasing);
 
-                    // update UI upload gate to sync with new gui_update_rate (counter_interval = rate × 25)
+                    // update ui upload gate to sync with new gui_update_rate (counter_interval = rate × 25)
                     upload_gate.update_gui_rate(settings.gui_update_rate);
 
                     // apply autofocus settings to running engine immediately
@@ -32,7 +32,7 @@ pub fn show_settings_window(
                         let _ = tx.send(EngineCommand::UpdateAutofocusSettings(pack));
                     }
 
-                    // NOTE: other settings (mutation probabilities, triangle limits, etc)
+                    // note: other settings (mutation probabilities, triangle limits, etc)
                     // are captured when creating the engine, so they only apply to new sessions
                 }
 
@@ -55,7 +55,7 @@ pub fn show_settings_window(
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 // ====================
-                // 1. DISPLAY & UI
+                // 1. display & ui
                 // ====================
                 egui::CollapsingHeader::new(egui::RichText::new("🖥️ Display & UI").heading())
                     .default_open(true)
@@ -65,7 +65,7 @@ pub fn show_settings_window(
                             .small());
                         ui.add_space(5.0);
 
-                        // GUI Update Rate
+                        // gui update rate
                         ui.horizontal(|ui| {
                             ui.label("GUI Update Rate:");
                             ui.add(egui::Slider::new(&mut settings.gui_update_rate, 1..=100)
@@ -83,7 +83,7 @@ pub fn show_settings_window(
                         ui.label("  Disable for faster rendering (may look jagged)");
                         ui.add_space(5.0);
 
-                        // Preview Supersampling
+                        // preview supersampling
                         ui.horizontal(|ui| {
                             ui.label("Preview Supersampling:");
                             ui.checkbox(&mut settings.preview_supersample_enabled, "");
@@ -105,7 +105,7 @@ pub fn show_settings_window(
                 ui.add_space(10.0);
 
                 // ====================
-                // 2. CORE EVOLUTION
+                // 2. core evolution
                 // ====================
                 egui::CollapsingHeader::new(egui::RichText::new("🔧 Core Evolution").heading())
                     .default_open(true)
@@ -115,7 +115,7 @@ pub fn show_settings_window(
                             .small());
                         ui.add_space(5.0);
 
-                        // Optimization Step Sizes
+                        // optimization step sizes
                         ui.label(egui::RichText::new("Optimization Step Sizes").strong());
                         ui.add_space(3.0);
 
@@ -276,7 +276,7 @@ pub fn show_settings_window(
                         ui.label(egui::RichText::new("Alpha Range").strong());
                         ui.add_space(3.0);
 
-                        // Show warning if dynamic alpha is enabled
+                        // show warning if dynamic alpha is enabled
                         if settings.dynamic_alpha_enabled {
                             ui.label(egui::RichText::new("⚠️ Dynamic Alpha Schedule is enabled - these values will be overridden")
                                 .color(egui::Color32::from_rgb(255, 180, 0)));
@@ -302,7 +302,7 @@ pub fn show_settings_window(
                 ui.add_space(10.0);
 
                 // ====================
-                // 3. ADVANCED OPTIMIZATIONS (NEW)
+                // 3. advanced optimizations (new)
                 // ====================
                 egui::CollapsingHeader::new(egui::RichText::new("🚀 Advanced Optimizations").heading())
                     .default_open(false)
@@ -313,7 +313,7 @@ pub fn show_settings_window(
                         ui.label("CPU-only optimization features for improved convergence");
                         ui.add_space(8.0);
 
-                        // ---- ADAPTIVE STEP SIZES ----
+                        // ---- adaptive step sizes ----
                         ui.label(egui::RichText::new("Adaptive Step Sizes (Coarse → Fine)").strong());
                         ui.add_space(3.0);
 
@@ -355,7 +355,7 @@ pub fn show_settings_window(
                         ui.separator();
                         ui.add_space(8.0);
 
-                        // ---- DYNAMIC ALPHA SCHEDULE ----
+                        // ---- dynamic alpha schedule ----
                         ui.label(egui::RichText::new("Dynamic Alpha Schedule (Translucent → Opaque)").strong());
                         ui.add_space(3.0);
 
@@ -408,7 +408,7 @@ pub fn show_settings_window(
                         ui.separator();
                         ui.add_space(8.0);
 
-                        // ---- EDGE-AWARE POLYGON SEEDING ----
+                        // ---- edge-aware polygon seeding ----
                         ui.label(egui::RichText::new("Edge-Aware Polygon Seeding").strong());
                         ui.add_space(3.0);
 
@@ -441,7 +441,7 @@ pub fn show_settings_window(
                         ui.separator();
                         ui.add_space(8.0);
 
-                        // ---- PERIODIC MICRO-POLISH ----
+                        // ---- periodic micro-polish ----
                         ui.label(egui::RichText::new("Periodic Micro-Polish Pass").strong());
                         ui.add_space(3.0);
 
@@ -480,7 +480,7 @@ pub fn show_settings_window(
 
                             ui.add_space(8.0);
 
-                            // Tiny-Polygon Cleanup - combined with micro-polish
+                            // tiny-polygon cleanup - combined with micro-polish
                             ui.separator();
                             ui.label(egui::RichText::new("  Tiny-Polygon Cleanup").strong().color(egui::Color32::from_rgb(100, 200, 255)));
                             ui.add_space(3.0);
@@ -515,7 +515,7 @@ pub fn show_settings_window(
                         ui.separator();
                         ui.add_space(8.0);
 
-                        // ---- SMART LAYER REORDER ----
+                        // ---- smart layer reorder ----
                         ui.label(egui::RichText::new("Smart Layer Reorder").strong());
                         ui.add_space(3.0);
 
@@ -558,7 +558,7 @@ pub fn show_settings_window(
                         ui.separator();
                         ui.add_space(8.0);
 
-                        // ---- PROGRESSIVE MULTI-RESOLUTION EVOLUTION ----
+                        // ---- progressive multi-resolution evolution ----
                         ui.label(egui::RichText::new("Progressive Multi-Resolution Evolution").strong());
                         ui.add_space(3.0);
 
@@ -599,7 +599,7 @@ pub fn show_settings_window(
                 ui.add_space(10.0);
 
                 // ====================
-                // 4. AUTOFOCUS (moved down)
+                // 4. autofocus (moved down)
                 // ====================
                 egui::CollapsingHeader::new(egui::RichText::new("🎯 Autofocus").heading())
                     .default_open(false)
@@ -612,7 +612,7 @@ pub fn show_settings_window(
                             .small());
                         ui.add_space(5.0);
 
-                        // mode Selector
+                        // mode selector
                         ui.horizontal(|ui| {
                             ui.label("Mode:");
                             egui::ComboBox::from_id_salt("autofocus_mode")
@@ -800,7 +800,7 @@ pub fn show_settings_window(
                 ui.add_space(10.0);
 
                 // ====================
-                // 5. POLYGON SHAPE
+                // 5. polygon shape
                 // ====================
                 egui::CollapsingHeader::new(egui::RichText::new("🔺 Polygon Shape").heading())
                     .default_open(false)
@@ -852,7 +852,7 @@ pub fn show_settings_window(
                 ui.add_space(10.0);
 
                 // ====================
-                // 6. FAST FITNESS
+                // 6. fast fitness
                 // ====================
                 egui::CollapsingHeader::new(egui::RichText::new("⚡ Fast Fitness").heading())
                     .default_open(false)
@@ -885,7 +885,7 @@ pub fn show_settings_window(
                 ui.add_space(10.0);
 
                 // ====================
-                // 7. PERCEPTUAL WEIGHTING
+                // 7. perceptual weighting
                 // ====================
                 egui::CollapsingHeader::new(egui::RichText::new("🎨 Perceptual Weighting").heading())
                     .default_open(false)
@@ -966,7 +966,7 @@ pub fn show_settings_window(
                 ui.add_space(10.0);
 
                 // ====================
-                // 8. METRICS & TERMINATION
+                // 8. metrics & termination
                 // ====================
                 egui::CollapsingHeader::new(egui::RichText::new("📈 Metrics & Termination").heading())
                     .default_open(false)
@@ -1017,7 +1017,7 @@ pub fn show_settings_window(
                     });
 
                 // ====================
-                // 9. KEYBOARD SHORTCUTS
+                // 9. keyboard shortcuts
                 // ====================
                 ui.add_space(15.0);
                 ui.separator();
