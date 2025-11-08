@@ -6,11 +6,10 @@ use crate::app_types::{EngineCommand, EngineUpdate, FocusRegion};
 use crate::engine::Engine;
 use crate::settings::AppSettings;
 
-/// Open a file dialog, load an image as RGBA8, spawn background engine thread
+/// open a file dialog, load an image as RGBA8, spawn background engine thread
 pub fn load_target_image(
     ctx: &egui::Context,
     settings: &AppSettings,
-    // mutable state to update
     target_tex: &mut Option<TextureHandle>,
     target_dims: &mut [usize; 2],
     command_tx: &mut Option<mpsc::Sender<EngineCommand>>,
@@ -109,7 +108,7 @@ pub fn load_target_image(
                                 engine.update_autofocus();  // force immediate autofocus update
                             }
                             EngineCommand::OptimizeAll => {
-                                // Combined optimization: recolor_all + micro_polish_pass with progress tracking
+                                // combined optimization: recolor_all + micro_polish_pass with progress tracking
                                 let update_tx_clone = update_tx.clone();
                                 let ctx_clone_inner = ctx_clone.clone();
                                 let baseline = engine.baseline_fitness;
@@ -159,16 +158,16 @@ pub fn load_target_image(
                                     ctx_clone_inner.request_repaint();
                                 };
 
-                                // Phase 1: Recolor all polygons
-                                // Create progress callback that only sends progress updates (no full state)
-                                // We'll send a full state update after recolor completes
+                                // phase 1: recolor all polygons
+                                // create progress callback that only sends progress updates (no full state)
+                                // we'll send a full state update after recolor completes
                                 let update_tx_progress = update_tx.clone();
                                 let ctx_progress = ctx_clone.clone();
                                 let mut recolor_progress = |current: usize, total: usize| {
-                                    // Send a minimal "progress-only" update
+                                    // send a minimal "progress-only" update
                                     // (we use a dummy EngineUpdate with only progress field set)
                                     let _ = update_tx_progress.send(EngineUpdate {
-                                        current_rgba: Arc::from(&[][..]), // dummy empty
+                                        current_rgba: Arc::from(&[][..]),
                                         generation: 0,
                                         fitness: 0.0,
                                         triangles: 0,
@@ -189,14 +188,14 @@ pub fn load_target_image(
 
                                 let recolor_improved = engine.recolor_all(&mut update_callback, &mut recolor_progress);
 
-                                // Phase 2: Micro-polish all polygons
-                                // Create progress callback that only sends progress updates (no full state)
+                                // phase 2: micro-polish all polygons
+                                // create progress callback that only sends progress updates (no full state)
                                 let update_tx_progress2 = update_tx.clone();
                                 let ctx_progress2 = ctx_clone.clone();
                                 let mut polish_progress = |current: usize, total: usize| {
-                                    // Send a minimal "progress-only" update
+                                    // send a minimal "progress-only" update
                                     let _ = update_tx_progress2.send(EngineUpdate {
-                                        current_rgba: Arc::from(&[][..]), // dummy empty
+                                        current_rgba: Arc::from(&[][..]),
                                         generation: 0,
                                         fitness: 0.0,
                                         triangles: 0,
@@ -222,7 +221,7 @@ pub fn load_target_image(
                                     &mut polish_progress,
                                 );
 
-                                // Send final update (clear progress)
+                                // send final update (clear progress)
                                 let _ = update_tx.send(EngineUpdate {
                                     current_rgba: Arc::from(engine.current_rgba.as_slice()),
                                     generation: engine.generation,
@@ -238,13 +237,13 @@ pub fn load_target_image(
                                 });
                                 ctx_clone.request_repaint();
 
-                                // Log result
+                                // log result
                                 println!("Optimize All complete: recolor improved {} / {}, micro-polish improved {} / {} polygons",
                                     recolor_improved, engine.genome.polys.len(),
                                     polish_improved, engine.genome.polys.len());
                             }
                             EngineCommand::SplitPolygons => {
-                                // Split high-error polygons crossing color boundaries
+                                // split high-error polygons crossing color boundaries
                                 let update_tx_clone = update_tx.clone();
                                 let ctx_clone_inner = ctx_clone.clone();
                                 let baseline = engine.baseline_fitness;
@@ -294,7 +293,7 @@ pub fn load_target_image(
                                     ctx_clone_inner.request_repaint();
                                 };
 
-                                // Progress callback for split operation
+                                // progress callback for split operation
                                 let update_tx_progress = update_tx.clone();
                                 let ctx_progress = ctx_clone.clone();
                                 let mut split_progress = |current: usize, total: usize| {
@@ -320,7 +319,7 @@ pub fn load_target_image(
 
                                 let num_splits = engine.split_pass(&mut update_callback, &mut split_progress);
 
-                                // Send final update (clear progress)
+                                // send final update (clear progress)
                                 let _ = update_tx.send(EngineUpdate {
                                     current_rgba: Arc::from(engine.current_rgba.as_slice()),
                                     generation: engine.generation,
@@ -336,11 +335,11 @@ pub fn load_target_image(
                                 });
                                 ctx_clone.request_repaint();
 
-                                // Log result
+                                // log result
                                 println!("Split operation complete: {} polygons split", num_splits);
                             }
                             EngineCommand::MergePolygons => {
-                                // Merge adjacent similar-colored polygons
+                                // merge adjacent similar-colored polygons
                                 let update_tx_clone = update_tx.clone();
                                 let ctx_clone_inner = ctx_clone.clone();
                                 let baseline = engine.baseline_fitness;
@@ -390,7 +389,7 @@ pub fn load_target_image(
                                     ctx_clone_inner.request_repaint();
                                 };
 
-                                // Progress callback for merge operation
+                                // progress callback for merge operation
                                 let update_tx_progress = update_tx.clone();
                                 let ctx_progress = ctx_clone.clone();
                                 let mut merge_progress = |current: usize, total: usize| {
@@ -416,7 +415,7 @@ pub fn load_target_image(
 
                                 let num_merges = engine.merge_pass(&mut update_callback, &mut merge_progress);
 
-                                // Send final update (clear progress)
+                                // send final update (clear progress)
                                 let _ = update_tx.send(EngineUpdate {
                                     current_rgba: Arc::from(engine.current_rgba.as_slice()),
                                     generation: engine.generation,
@@ -432,7 +431,7 @@ pub fn load_target_image(
                                 });
                                 ctx_clone.request_repaint();
 
-                                // Log result
+                                // log result
                                 println!("Merge operation complete: {} polygon pairs merged", num_merges);
                             }
                         }
@@ -446,12 +445,12 @@ pub fn load_target_image(
                         let update_tx_clone = update_tx.clone();
                         let ctx_clone_inner = ctx_clone.clone();
 
-                        let baseline = engine.baseline_fitness;  // For percent normalization
+                        let baseline = engine.baseline_fitness;  // for percent normalization
                         let current_generation = engine.generation;
                         let img_width = engine.width;
                         let img_height = engine.height;
                         let psnr_peak = engine.metrics_settings.psnr_peak;
-                        let avg_weight = engine.avg_weight_q8;  // For weighted SAD display only
+                        let avg_weight = engine.avg_weight_q8;  // for weighted SAD display only
                         let perceptual_k = engine.perceptual_k_q8();  // k value if weighted, None otherwise
 
                         let mut update_callback = |_genome: &crate::dna::Genome, rgba: &[u8], fitness_val: f64, _improved: bool| {
@@ -460,7 +459,7 @@ pub fn load_target_image(
                                 fitness_val,
                             );
 
-                            // Compute metrics snapshot from fitness_val using constructors
+                            // compute metrics snapshot from fitness_val using constructors
                             // (centralized metric math prevents drift between callsites)
                             let sad = fitness_val;
                             let num_px = (img_width as usize) * (img_height as usize);
@@ -508,7 +507,7 @@ pub fn load_target_image(
                         let focus_tile_indices = engine.autofocus_selected_indices.clone();
 
                         if autofocus_tiles.is_some() {
-                            engine.autofocus_last_tiles = None;  // clear after sending
+                            engine.autofocus_last_tiles = None;
                         }
 
                         let _ = update_tx.send(EngineUpdate {
@@ -530,7 +529,7 @@ pub fn load_target_image(
                         thread::sleep(std::time::Duration::from_millis(10));
                     }
                 }
-            }).expect("Spawn Engine thread.");
+            }).expect("spawn Engine thread.");
 
             *command_tx = Some(cmd_tx);
             *update_rx = Some(upd_rx);
@@ -542,7 +541,7 @@ pub fn load_target_image(
     }
 }
 
-/// Update the "current" texture from received RGBA data (accepts Arc to avoid copies)
+/// update the "current" texture from received RGBA data (accepts Arc to avoid copies)
 pub fn update_current_texture(
     ctx: &egui::Context,
     target_dims: [usize; 2],
@@ -566,7 +565,7 @@ pub fn update_current_texture(
         let img_buf = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
             w as u32,
             h as u32,
-            rgba.to_vec(), // convert Arc<[u8]> to Vec<u8>
+            rgba.to_vec(),
         ).expect("Failed to create image buffer");
 
         let resized = image::imageops::resize(
@@ -582,12 +581,12 @@ pub fn update_current_texture(
         (w, h, rgba.to_vec())
     };
 
-    // TODO Preview Supersampling - Apply SSAA here for cleaner UI rendering
-    // If settings.preview_supersample_enabled:
-    //   1. Render to offscreen buffer at (preview_w * scale, preview_h * scale)
-    //   2. Downsample using box/tent filter to (preview_w, preview_h)
-    //   3. This is UI-only enhancement - does NOT affect SVG export or fitness
-    // Current: Direct mapping from preview_data → ColorImage (no supersampling)
+    // TODO preview supersampling - apply SSAA here for cleaner UI rendering
+    // if settings.preview_supersample_enabled:
+    //   1. render to offscreen buffer at (preview_w * scale, preview_h * scale)
+    //   2. downsample using box/tent filter to (preview_w, preview_h)
+    //   3. this is UI-only enhancement - does NOT affect SVG export or fitness
+    // current: direct mapping from preview_data → ColorImage (no supersampling)
     let img = ColorImage::from_rgba_premultiplied([preview_w, preview_h], &preview_data);
 
     if let Some(tex) = current_tex.as_mut() {
@@ -598,8 +597,8 @@ pub fn update_current_texture(
     }
 }
 
-/// Process updates from the background engine thread
-/// Uses throttled texture uploads (10ms || every 25 updates)
+/// process updates from the background engine thread
+/// uses throttled texture uploads (10ms || every 25 updates)
 pub fn poll_engine_updates(
     ctx: &egui::Context,
     target_dims: [usize; 2],
@@ -628,11 +627,11 @@ pub fn poll_engine_updates(
 
         // apply the latest update if we got one
         if let Some(update) = latest_update {
-            // Check if this is a progress-only update (empty rgba)
+            // check if this is a progress-only update (empty rgba)
             let is_progress_only = update.current_rgba.is_empty();
 
             if !is_progress_only {
-                // Full update - update all state
+                // full update - update all state
                 *generation = update.generation;
                 *fitness = update.fitness;
                 *triangles = update.triangles;
@@ -646,7 +645,7 @@ pub fn poll_engine_updates(
                 }
             }
 
-            // Always update progress (works for both full and progress-only updates)
+            // always update progress (works for both full and progress-only updates)
             *optimization_progress = update.optimization_progress;
 
             // update autofocus tile data if present (sent when autofocus re-evaluates)
