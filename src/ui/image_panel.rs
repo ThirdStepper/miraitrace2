@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use crate::app_types::{EngineCommand, FocusRegion};
 use crate::settings::AppSettings;
 
-/// Draw a texture scaled to fit within the available space preserving aspect ratio
+/// draw a texture scaled to fit within the available space preserving aspect ratio
 pub fn aspect_fit(ui: &mut egui::Ui, tex: &TextureHandle) {
     let avail = ui.available_size();
     let tex_size = tex.size_vec2();
@@ -13,7 +13,7 @@ pub fn aspect_fit(ui: &mut egui::Ui, tex: &TextureHandle) {
     ui.add(Image::new(tex).fit_to_exact_size(draw_size));
 }
 
-/// Draw texture with mouse interaction for region selection (returns response and scale)
+/// draw texture with mouse interaction for region selection (returns response and scale)
 pub fn aspect_fit_interactive(ui: &mut egui::Ui, tex: &TextureHandle) -> (egui::Response, f32, egui::Vec2) {
     let avail = ui.available_size();
     let tex_size = tex.size_vec2();
@@ -23,16 +23,16 @@ pub fn aspect_fit_interactive(ui: &mut egui::Ui, tex: &TextureHandle) -> (egui::
     (response, scale, tex_size)
 }
 
-/// Render the central panel (welcome screen or side-by-side image view)
+/// render the central panel (welcome screen or side-by-side image view)
 pub fn render_central_panel(
     ctx: &egui::Context,
     target_tex: &Option<TextureHandle>,
     current_tex: &Option<TextureHandle>,
-    // State for region selection
+    // state for region selection
     drag_start: &mut Option<egui::Pos2>,
     focus_region: &mut Option<FocusRegion>,
     command_tx: &Option<mpsc::Sender<EngineCommand>>,
-    // Autofocus visualization
+    // autofocus visualization
     autofocus_tiles: &Option<Vec<(usize, f64, FocusRegion)>>,
     autofocus_active_indices: &Option<Vec<usize>>,
     settings: &AppSettings,
@@ -59,12 +59,12 @@ pub fn render_central_panel(
     });
 }
 
-/// Render the welcome screen when no image is loaded
+/// render the welcome screen when no image is loaded
 fn render_welcome_screen(ui: &mut egui::Ui, _ctx: &egui::Context, on_load_image: &mut bool) {
     ui.vertical_centered(|ui| {
         ui.add_space(80.0);
 
-        // Title and tagline
+        // title and tagline
         ui.heading(egui::RichText::new("MiraiTrace2")
             .size(32.0)
             .color(egui::Color32::from_rgb(100, 150, 255)));
@@ -163,7 +163,7 @@ fn render_welcome_screen(ui: &mut egui::Ui, _ctx: &egui::Context, on_load_image:
     });
 }
 
-/// Render the side-by-side image comparison view
+/// render the side-by-side image comparison view
 fn render_image_comparison(
     ui: &mut egui::Ui,
     target_tex: &Option<TextureHandle>,
