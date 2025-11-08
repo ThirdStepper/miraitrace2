@@ -3,11 +3,11 @@
 // this module provides functions to ensure polygons remain:
 // - simple (no self-intersections / bow-ties)
 // - convex (no inward dents)
-// - CCW winding (positive signed area)
+// - ccw winding (positive signed area)
 
 
 /// compute signed area of a polygon using the shoelace formula.
-/// returns positive for CCW, negative for CW, zero for degenerate.
+/// returns positive for ccw, negative for cw, zero for degenerate.
 pub fn signed_area(pts: &[(f32, f32)]) -> f32 {
     if pts.len() < 3 {
         return 0.0;
@@ -25,7 +25,7 @@ pub fn signed_area(pts: &[(f32, f32)]) -> f32 {
 /// check if two line segments intersect (proper crossing, not touching).
 /// segments: (a, b) and (c, d)
 fn segments_intersect(a: (f32, f32), b: (f32, f32), c: (f32, f32), d: (f32, f32)) -> bool {
-    // CCW test: returns cross product sign
+    // ccw test: returns cross product sign
     fn ccw(p: (f32, f32), q: (f32, f32), r: (f32, f32)) -> f32 {
         (r.1 - p.1) * (q.0 - p.0) - (q.1 - p.1) * (r.0 - p.0)
     }
@@ -81,7 +81,7 @@ pub fn is_convex_ccw(pts: &[(f32, f32)]) -> bool {
         return false;
     }
 
-    // check if area is positive (CCW)
+    // check if area is positive (ccw)
     let area = signed_area(pts);
     if area <= 0.0 {
         return false;
@@ -103,16 +103,16 @@ pub fn is_convex_ccw(pts: &[(f32, f32)]) -> bool {
         let cross = dx1 * dy2 - dy1 * dx2;
 
         if cross < EPSILON {
-            return false; // right turn or collinear (concave)
+            return false;
         }
     }
 
     true
 }
 
-/// sanitize a polygon to be CCW, simple, and convex.
+/// sanitize a polygon to be ccw, simple, and convex.
 /// steps:
-/// 1. ensure CCW winding (reverse if needed)
+/// 1. ensure ccw winding (reverse if needed)
 /// 2. check if simple and convex (no self-intersections)
 ///
 /// returns true if valid, false if unfixable.
@@ -166,21 +166,21 @@ mod tests {
 
     #[test]
     fn test_signed_area_ccw() {
-        // Square with CCW winding
+        // square with ccw winding
         let pts = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
         assert!(signed_area(&pts) > 0.0);
     }
 
     #[test]
     fn test_signed_area_cw() {
-        // Square with CW winding
+        // square with cw winding
         let pts = vec![(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)];
         assert!(signed_area(&pts) < 0.0);
     }
 
     #[test]
     fn test_bow_tie_rejected() {
-        // Bow-tie (self-intersecting)
+        // bow-tie (self-intersecting)
         let pts = vec![(0.0, 0.0), (1.0, 1.0), (1.0, 0.0), (0.0, 1.0)];
         assert!(!is_simple(&pts));
     }
@@ -194,8 +194,8 @@ mod tests {
 
     #[test]
     fn test_concave_quad_rejected() {
-        // Concave quad: 3 corners of a square, plus one point pushed inside
-        // Makes a "pac-man" mouth shape
+        // concave quad: 3 corners of a square, plus one point pushed inside
+        // makes a "pac-man" mouth shape
         //   (0,1)---(0.3,0.5)
         //     |       /
         //     |     /
@@ -206,30 +206,30 @@ mod tests {
 
     #[test]
     fn test_sanitize_fixes_winding() {
-        // CW square
+        // cw square
         let mut pts = vec![(0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0)];
         assert!(sanitize_ccw_simple_convex(&mut pts));
-        // Should be CCW now
+        // should be ccw now
         assert!(signed_area(&pts) > 0.0);
     }
 }
 
-/// Compute polygon area using Shoelace formula
-/// Returns absolute area in square pixels
+/// compute polygon area using shoelace formula
+/// returns absolute area in square pixels
 #[inline]
 pub fn polygon_area(points: &[(f32, f32)]) -> f32 {
     signed_area(points).abs()
 }
 
-/// Compute the convex hull of a set of points using Graham scan algorithm.
-/// Returns points in CCW order forming the convex hull.
-/// Returns empty vec if input has fewer than 3 points.
+/// compute the convex hull of a set of points using graham scan algorithm.
+/// returns points in ccw order forming the convex hull.
+/// returns empty vec if input has fewer than 3 points.
 pub fn convex_hull(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
     if points.len() < 3 {
         return points.to_vec();
     }
 
-    // Find the point with lowest y-coordinate (leftmost if tie)
+    // find the point with lowest y-coordinate (leftmost if tie)
     let mut lowest_idx = 0;
     for i in 1..points.len() {
         if points[i].1 < points[lowest_idx].1
@@ -240,17 +240,17 @@ pub fn convex_hull(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
 
     let pivot = points[lowest_idx];
 
-    // Sort points by polar angle with respect to pivot
+    // sort points by polar angle with respect to pivot
     let mut sorted: Vec<(f32, f32)> = points.iter()
         .filter(|&&p| p != pivot)
         .copied()
         .collect();
 
     sorted.sort_by(|a, b| {
-        // Compute cross product to determine angle order
+        // compute cross product to determine angle order
         let cross = (a.0 - pivot.0) * (b.1 - pivot.1) - (a.1 - pivot.1) * (b.0 - pivot.0);
         if cross.abs() < 1e-9 {
-            // Collinear - sort by distance
+            // collinear - sort by distance
             let dist_a = (a.0 - pivot.0).powi(2) + (a.1 - pivot.1).powi(2);
             let dist_b = (b.0 - pivot.0).powi(2) + (b.1 - pivot.1).powi(2);
             dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
@@ -261,12 +261,12 @@ pub fn convex_hull(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
         }
     });
 
-    // Graham scan
+    // graham scan
     let mut hull = Vec::new();
     hull.push(pivot);
 
     for &p in &sorted {
-        // Remove points that would make a right turn
+        // remove points that would make a right turn
         while hull.len() >= 2 {
             let p1 = hull[hull.len() - 2];
             let p2 = hull[hull.len() - 1];
@@ -283,10 +283,10 @@ pub fn convex_hull(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
     hull
 }
 
-/// Check if two polygons share an edge or are adjacent (within epsilon tolerance).
-/// Returns true if they have overlapping edges or are very close.
+/// check if two polygons share an edge or are adjacent (within epsilon tolerance).
+/// returns true if they have overlapping edges or are very close.
 pub fn polygons_share_edge(poly1: &[(f32, f32)], poly2: &[(f32, f32)], epsilon: f32) -> bool {
-    // Quick AABB rejection test
+    // quick AABB rejection test
     let (min1_x, max1_x, min1_y, max1_y) = {
         let mut min_x = f32::MAX;
         let mut max_x = f32::MIN;
@@ -315,13 +315,13 @@ pub fn polygons_share_edge(poly1: &[(f32, f32)], poly2: &[(f32, f32)], epsilon: 
         (min_x, max_x, min_y, max_y)
     };
 
-    // Check if AABBs overlap (with epsilon margin)
+    // check if AABBs overlap (with epsilon margin)
     if max1_x + epsilon < min2_x || max2_x + epsilon < min1_x
         || max1_y + epsilon < min2_y || max2_y + epsilon < min1_y {
         return false;
     }
 
-    // Check for shared vertices
+    // check for shared vertices
     for &v1 in poly1 {
         for &v2 in poly2 {
             let dist_sq = (v1.0 - v2.0).powi(2) + (v1.1 - v2.1).powi(2);
@@ -331,9 +331,9 @@ pub fn polygons_share_edge(poly1: &[(f32, f32)], poly2: &[(f32, f32)], epsilon: 
         }
     }
 
-    // Check for edge proximity (vertex from one polygon near edge of another)
+    // check for edge proximity (vertex from one polygon near edge of another)
     let point_near_segment = |p: (f32, f32), a: (f32, f32), b: (f32, f32)| -> bool {
-        // Compute distance from point p to line segment ab
+        // compute distance from point p to line segment ab
         let ab_x = b.0 - a.0;
         let ab_y = b.1 - a.1;
         let ap_x = p.0 - a.0;
@@ -341,7 +341,7 @@ pub fn polygons_share_edge(poly1: &[(f32, f32)], poly2: &[(f32, f32)], epsilon: 
 
         let ab_len_sq = ab_x * ab_x + ab_y * ab_y;
         if ab_len_sq < 1e-9 {
-            // Degenerate segment
+            // degenerate segment
             let dist_sq = ap_x * ap_x + ap_y * ap_y;
             return dist_sq < epsilon * epsilon;
         }
@@ -354,7 +354,7 @@ pub fn polygons_share_edge(poly1: &[(f32, f32)], poly2: &[(f32, f32)], epsilon: 
         dist_sq < epsilon * epsilon
     };
 
-    // Check if any vertex of poly1 is near any edge of poly2
+    // check if any vertex of poly1 is near any edge of poly2
     for &v in poly1 {
         for i in 0..poly2.len() {
             let j = (i + 1) % poly2.len();
@@ -364,7 +364,7 @@ pub fn polygons_share_edge(poly1: &[(f32, f32)], poly2: &[(f32, f32)], epsilon: 
         }
     }
 
-    // Check if any vertex of poly2 is near any edge of poly1
+    // check if any vertex of poly2 is near any edge of poly1
     for &v in poly2 {
         for i in 0..poly1.len() {
             let j = (i + 1) % poly1.len();
