@@ -6,8 +6,8 @@ use rayon::prelude::*;
 
 /// compute autofocus tiles using Quadtree subdivision
 ///
-/// algorithm: Recursively split regions into 4 quadrants if error exceeds threshold.
-/// This creates adaptive resolution - small tiles in high-error areas, large tiles in low-error areas.
+/// algorithm: recursively split regions into 4 quadrants if error exceeds threshold.
+/// this creates adaptive resolution - small tiles in high-error areas, large tiles in low-error areas.
 ///
 /// parameters:
 /// - target/current: Premultiplied RGBA buffers
@@ -96,10 +96,10 @@ fn quadtree_recursive(
     let mid_y = (region.top + region.bottom) / 2.0;
 
     let quadrants = [
-        FocusRegion::new(region.left, mid_x, region.top, mid_y),       // top-left
-        FocusRegion::new(mid_x, region.right, region.top, mid_y),      // top-right
-        FocusRegion::new(region.left, mid_x, mid_y, region.bottom),    // bottom-left
-        FocusRegion::new(mid_x, region.right, mid_y, region.bottom),   // bottom-right
+        FocusRegion::new(region.left, mid_x, region.top, mid_y),
+        FocusRegion::new(mid_x, region.right, region.top, mid_y),
+        FocusRegion::new(region.left, mid_x, mid_y, region.bottom),
+        FocusRegion::new(mid_x, region.right, mid_y, region.bottom),
     ];
 
     // recursively process each quadrant
@@ -121,7 +121,7 @@ fn quadtree_recursive(
 
 /// compute autofocus tiles using Binary Space Partitioning
 ///
-/// algorithm: Iteratively find worst tile and split it in half until max_tiles reached.
+/// algorithm: iteratively find worst tile and split it in half until max_tiles reached.
 /// splits alternate horizontal/vertical based on aspect ratio.
 /// now supports adaptive subdivision - stops splitting tiles below error threshold.
 ///
@@ -248,21 +248,21 @@ fn compute_region_error(
 fn is_region_too_small(region: &FocusRegion, width: u32, height: u32) -> bool {
     let w = ((region.right - region.left) * width as f32).round() as u32;
     let h = ((region.bottom - region.top) * height as f32).round() as u32;
-    // Minimum is max(32px, ~1/64 of image on the short side)
+    // minimum is max(32px, ~1/64 of image on the short side)
     let rel_min = (width.min(height) / 64).max(32);
     w < rel_min || h < rel_min
 }
 
 /// automatically compute a reasonable error threshold for adaptive subdivision
-/// strategy: Sample a 4×4 grid, compute tile errors in parallel
-/// - BSP mode: Uses max-based threshold (fraction of worst error) - scales with fitness
-/// - quadtree mode: Uses mean + multiplier*stddev (per-region checks)
+/// strategy: sample a 4×4 grid, compute tile errors in parallel
+/// - BSP mode: uses max-based threshold (fraction of worst error) - scales with fitness
+/// - quadtree mode: uses mean + multiplier*stddev (per-region checks)
 /// BSP uses max because it checks worst tile globally as stop condition
 /// quadtree uses mean because it checks each region independently
 ///
-/// Supports two metrics modes:
-/// - Percentage: Uses fitness_percent (legacy, 0-100%)
-/// - ResolutionInvariant: Uses PSNR thresholds (recommended)
+/// supports two metrics modes:
+/// - Percentage: uses fitness_percent (legacy, 0-100%)
+/// - ResolutionInvariant: uses PSNR thresholds (recommended)
 fn compute_auto_threshold(
     target: &[u8],
     current: &[u8],
@@ -292,7 +292,7 @@ fn compute_auto_threshold(
         })
         .collect();
 
-    // Compute base threshold stats
+    // compute base threshold stats
     let max_error = errors.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let mean = errors.iter().sum::<f64>() / errors.len() as f64;
     let variance = errors.iter()
@@ -301,26 +301,26 @@ fn compute_auto_threshold(
             diff * diff
         })
         .sum::<f64>() / errors.len() as f64;
-    let stddev = variance.sqrt().max(1e-9); // Guard against zero variance (uniform error across tiles)
+    let stddev = variance.sqrt().max(1e-9); // guard against zero variance (uniform error across tiles)
 
-    // Determine multiplier based on metrics mode
+    // determine multiplier based on metrics mode
     let multiplier = match metrics_mode {
         crate::settings::MetricsMode::ResolutionInvariant => {
             // PSNR-based thresholds (resolution-invariant, recommended)
-            // Higher PSNR = better quality = more aggressive (lower multiplier)
+            // higher PSNR = better quality = more aggressive (lower multiplier)
             if psnr >= 35.0 {
-                0.3   // >= 35 dB: Very fine refinement
+                0.3   // >= 35 dB: very fine refinement
             } else if psnr >= 30.0 {
-                0.4   // 30-35 dB: Fine tuning
+                0.4   // 30-35 dB: fine tuning
             } else if psnr >= 25.0 {
-                0.5   // 25-30 dB: Moderate optimization
+                0.5   // 25-30 dB: moderate optimization
             } else {
-                0.7   // < 25 dB: Aggressive exploration
+                0.7   // < 25 dB: aggressive exploration
             }
         }
         crate::settings::MetricsMode::Percentage => {
-            // Percentage-based thresholds (legacy)
-            // Higher percent = better = more aggressive (lower multiplier)
+            // percentage-based thresholds (legacy)
+            // higher percent = better = more aggressive (lower multiplier)
             if fitness_percent >= 95.0 {
                 0.3
             } else if fitness_percent >= 90.0 {
@@ -339,18 +339,18 @@ fn compute_auto_threshold(
         }
     };
 
-    // Apply multiplier based on algorithm mode
+    // apply multiplier based on algorithm mode
     match mode {
         "bsp" => {
-            // BSP: Use max-based threshold (fraction of worst sampled error)
+            // BSP: use max-based threshold (fraction of worst sampled error)
             max_error * multiplier
         }
         "quadtree" => {
-            // quadtree: Use mean-based threshold (per-region adaptive)
+            // quadtree: use mean-based threshold (per-region adaptive)
             mean + multiplier * stddev
         }
         _ => {
-            // Fallback: use mean-based
+            // fallback: use mean-based
             mean + 0.5 * stddev
         }
     }
