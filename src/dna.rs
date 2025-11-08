@@ -215,9 +215,9 @@ impl Genome {
         }
     }
 
-    /// Scale all polygon coordinates by a factor.
-    /// Used for progressive multi-resolution evolution.
-    /// Factor: 0.25 for 1/4x, 0.5 for 1/2x, 1.0 for 1x (full res)
+    /// scale all polygon coordinates by a factor.
+    /// used for progressive multi-resolution evolution.
+    /// factor: 0.25 for 1/4x, 0.5 for 1/2x, 1.0 for 1x (full res)
     pub fn scale_coords(&mut self, factor: f32) {
         for poly_arc in &mut self.polys {
             // Use Arc::make_mut for copy-on-write
@@ -227,30 +227,7 @@ impl Genome {
                 point.1 *= factor;
             }
         }
-    }
-
-    /// Create a scaled copy of the genome for multi-resolution rendering.
-    /// The new genome will have scaled dimensions and scaled polygon coordinates.
-    /// Factor: 0.25 for 1/4x, 0.5 for 1/2x, 1.0 for 1x (full res)
-    pub fn create_scaled(&self, factor: f32) -> Self {
-        let scaled_width = (self.width as f32 * factor).max(1.0) as u32;
-        let scaled_height = (self.height as f32 * factor).max(1.0) as u32;
-
-        let scaled_polys: Vec<Arc<Polygon>> = self.polys.iter().map(|poly_arc| {
-            let mut poly = (**poly_arc).clone();
-            for point in &mut poly.points {
-                point.0 *= factor;
-                point.1 *= factor;
-            }
-            Arc::new(poly)
-        }).collect();
-
-        Genome {
-            width: scaled_width,
-            height: scaled_height,
-            polys: scaled_polys,
-        }
-    }
+    } 
 }
 
 // serde helper module for serializing/deserializing Vec<Arc<T>>. we serialize the inner value directly
