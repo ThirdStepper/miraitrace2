@@ -1,93 +1,93 @@
 #[derive(Clone)]
 pub struct MutateConfig {
-    // nutation probabilities
-    pub p_add: f32,        // chance to add a triangle (20% in original)
-    pub p_remove: f32,     // chance to remove a triangle (15% in original)
-    pub p_reorder: f32,    // chance to reorder z-index (15% in original)
-    pub p_move_point: f32, // chance to move a vertex (15% in original)
-    pub p_recolor: f32,    // chance to recolor a polygon (new: color-only mutation)
-    pub p_transform: f32,  // chance to translate+scale a polygon (whole-polygon transformation)
-    pub p_multi_vertex: f32,  // chance to move multiple vertices simultaneously (coherent perturbation)
+    // mutation probabilities
+    pub p_add: f32,
+    pub p_remove: f32,
+    pub p_reorder: f32,
+    pub p_move_point: f32,
+    pub p_recolor: f32,
+    pub p_transform: f32,
+    pub p_multi_vertex: f32,
     // remainder = no mutation, just evaluate current state
 
     // mutation parameters (kept for potential future use)
-    pub pos_sigma: f32,   // pixel jitter for vertices
+    pub pos_sigma: f32,
 
     // whole-polygon transform parameters
-    pub transform_translate_max: f32,  // maximum translation distance (pixels)
-    pub transform_scale_min: f32,      // minimum scale factor (e.g., 0.8 = 80%)
-    pub transform_scale_max: f32,      // maximum scale factor (e.g., 1.2 = 120%)
+    pub transform_translate_max: f32,
+    pub transform_scale_min: f32,
+    pub transform_scale_max: f32,
 
     // multi-vertex perturbation parameters
-    pub multi_vertex_step: f32,        // movement magnitude for multi-vertex mutations (pixels)
-    pub multi_vertex_adjacent_ratio: f32,  // ratio of adjacent vs non-adjacent vertex selection (0.7 = 70% adjacent)
+    pub multi_vertex_step: f32,
+    pub multi_vertex_adjacent_ratio: f32,
 
     // optimization step sizes
-    pub color_step: f32,  // step size for color optimization (N_COLOR_VAR = 5)
-    pub pos_step: f32,    // step size for shape optimization (N_POS_VAR = 15)
+    pub color_step: f32,  // N_COLOR_VAR = 5
+    pub pos_step: f32,    // N_POS_VAR = 15
 
     // limits
-    pub min_tris: usize,  // minimum triangles before mutations activate
-    pub max_tris: usize,  // cap triangles
+    pub min_tris: usize,
+    pub max_tris: usize,
 
     // alpha range (matching original 20-200 / 255)
     pub alpha_min: f32,
     pub alpha_max: f32,
 
     // batch evaluation
-    pub batch_size: usize,  // Number of candidates to evaluate in parallel per generation
+    pub batch_size: usize,
 
     // polygon vertex count limits (arity control)
-    pub min_vertices: usize,  // Minimum vertices per polygon (3-6)
-    pub max_vertices: usize,  // Maximum vertices per polygon (3-6)
+    pub min_vertices: usize,
+    pub max_vertices: usize,
 
     // geometry constraints
-    pub enforce_simple_convex: bool,  // Enforce simple, convex, CCW polygons (no bow-ties)
+    pub enforce_simple_convex: bool,  // enforce simple, convex, CCW polygons (no bow-ties)
 
     // fast fitness evaluation
-    pub use_pyramid_fitness: bool,  // Use coarse-to-fine pyramid for faster fitness (experimental)
-    pub use_tiled_fitness: bool,    // Use tiled error cache for incremental fitness (recommended)
+    pub use_pyramid_fitness: bool,
+    pub use_tiled_fitness: bool,
 
     // perceptual weighting (luminance-based emphasis for bright regions)
     pub perceptual_k_q8: u16,  // Q8.8 fixed-point weight parameter (0=off, 48≈balanced, 32-96 typical)
-    pub perceptual_scale_by_alpha: bool,  // If true, multiply weight by (alpha/255). Default: false (premul RGB already encodes coverage)
+    pub perceptual_scale_by_alpha: bool,
 
     // periodic micro-polish pass (global refinement with tiny steps)
-    pub micro_polish_enabled: bool,     // Enable periodic micro-polish pass
-    pub micro_polish_interval: u64,     // Run micro-polish every N generations
-    pub micro_polish_vertex_step: f32,  // Vertex step size (e.g., 1.0 px)
-    pub micro_polish_color_step: f32,   // Color step size (e.g., 1/255)
-    pub micro_polish_cleanup_enabled: bool,  // Enable tiny-polygon cleanup
-    pub micro_polish_min_area_px: f32,  // Minimum area (square pixels)
-    pub micro_polish_cleanup_epsilon: f32,  // Fitness tolerance for cleanup
+    pub micro_polish_enabled: bool,
+    pub micro_polish_interval: u64,
+    pub micro_polish_vertex_step: f32,
+    pub micro_polish_color_step: f32,
+    pub micro_polish_cleanup_enabled: bool,
+    pub micro_polish_min_area_px: f32,
+    pub micro_polish_cleanup_epsilon: f32,
 
     // smart layer reorder - local z-order optimization
-    pub smart_reorder_enabled: bool,    // Enable smart reorder heuristic
-    pub smart_reorder_max_hops: u32,    // Max hops up/down to test
-    pub smart_reorder_interval: u64,    // Run every N generations
-    pub smart_reorder_error_percentile: f32,  // Error threshold (0.75 = top 25%)
+    pub smart_reorder_enabled: bool,
+    pub smart_reorder_max_hops: u32,
+    pub smart_reorder_interval: u64,
+    pub smart_reorder_error_percentile: f32,
 
     // adaptive step sizes (coarse → fine over time)
-    pub adaptive_steps_enabled: bool,   // Enable adaptive step size scaling
-    pub step_scale_min: f32,            // Minimum step scale (fine, e.g., 0.25)
-    pub step_scale_max: f32,            // Maximum step scale (coarse, e.g., 1.0)
-    pub step_scale_curve: f32,          // Curve exponent (>1 biases toward fine late)
+    pub adaptive_steps_enabled: bool,
+    pub step_scale_min: f32,
+    pub step_scale_max: f32,
+    pub step_scale_curve: f32,
 
     // dynamic alpha schedule (translucent → opaque over time)
-    pub dynamic_alpha_enabled: bool,    // Enable dynamic alpha schedule
-    pub alpha_min_start: f32,           // Initial minimum alpha (e.g., 0.078)
-    pub alpha_max_start: f32,           // Initial maximum alpha (e.g., 0.784)
-    pub alpha_min_target: f32,          // Target minimum alpha (e.g., 0.02)
-    pub alpha_max_target: f32,          // Target maximum alpha (e.g., 0.98)
-    pub alpha_schedule_curve: f32,      // Curve exponent for alpha progression
+    pub dynamic_alpha_enabled: bool,
+    pub alpha_min_start: f32,
+    pub alpha_max_start: f32,
+    pub alpha_min_target: f32,
+    pub alpha_max_target: f32,
+    pub alpha_schedule_curve: f32,
 
     // edge-aware polygon seeding
-    pub edge_seeding_enabled: bool,     // Enable edge-aware seeding
-    pub edge_seeding_probability: f32,  // Probability of edge-guided vs random seeding (0.0-1.0)
-    pub edge_seeding_vertex_range_px: f32,  // Vertex placement range along edges (pixels)
+    pub edge_seeding_enabled: bool,
+    pub edge_seeding_probability: f32,
+    pub edge_seeding_vertex_range_px: f32,
 
     // progressive multi-resolution evolution
-    pub multi_res_enabled: bool,        // Enable multi-resolution evolution (opt-in)
+    pub multi_res_enabled: bool,
     pub multi_res_stage1_threshold: f64,  // SAD/px threshold for 1/4x → 1/2x transition
     pub multi_res_stage2_threshold: f64,  // SAD/px threshold for 1/2x → 1x transition
 }
@@ -100,28 +100,28 @@ impl Default for MutateConfig {
             p_remove: 0.15,     // POLYS_REMOVE_RATE = 15%
             p_reorder: 0.15,    // POLYS_REORDER_RATE = 15%
             p_move_point: 0.15, // POINT_MOVE_RATE = 15%
-            p_recolor: 0.15,    // New color-only mutation (5%)
-            p_transform: 0.10,  // Whole-polygon translate+scale (10%)
-            p_multi_vertex: 0.08,  // Multi-vertex perturbation (8%)
+            p_recolor: 0.15,
+            p_transform: 0.10,
+            p_multi_vertex: 0.08,
             // remainder: 12% = no mutation
 
             // mutation parameters
-            pos_sigma: 10.0,     // ±10 pixels for random mutations
+            pos_sigma: 10.0,
 
             // whole-polygon transform parameters
-            transform_translate_max: 20.0,  // ±20 pixels translation
-            transform_scale_min: 0.8,       // 80% minimum size
-            transform_scale_max: 1.2,       // 120% maximum size
+            transform_translate_max: 20.0,
+            transform_scale_min: 0.8,
+            transform_scale_max: 1.2,
 
             // multi-vertex perturbation parameters
-            multi_vertex_step: 10.0,        // 10 pixels movement magnitude
-            multi_vertex_adjacent_ratio: 0.7,  // 70% adjacent, 30% non-adjacent
+            multi_vertex_step: 10.0,
+            multi_vertex_adjacent_ratio: 0.7,
 
-            // optimization step sizes 
-            color_step: 5.0 / 255.0,  
-            pos_step: 15.0,           
+            // optimization step sizes
+            color_step: 5.0 / 255.0,
+            pos_step: 15.0,
 
-            // limits 
+            // limits
             min_tris: 15_000,
             max_tris: 150_000,
 
@@ -129,62 +129,62 @@ impl Default for MutateConfig {
             alpha_min: 20.0 / 255.0,
             alpha_max: 200.0 / 255.0,
 
-            // batch evaluation (8 candidates per generation)
+            // batch evaluation
             batch_size: 8,
 
-            // polygon vertex count limits (dynamic 3-6 = original behavior)
+            // polygon vertex count limits
             min_vertices: 3,
             max_vertices: 6,
 
-            // geometry constraints (enabled by default)
+            // geometry constraints
             enforce_simple_convex: true,
 
-            // fast fitness (enabled by default - both are proven safe)
+            // fast fitness
             use_pyramid_fitness: true,
             use_tiled_fitness: true,
 
-            // perceptual weighting (disabled by default - user opt-in)
-            perceptual_k_q8: 0,  // 0 = off (no perceptual weighting)
-            perceptual_scale_by_alpha: false,  // Don't scale by alpha (premul already encodes coverage)
+            // perceptual weighting
+            perceptual_k_q8: 0,
+            perceptual_scale_by_alpha: false,
 
-            // micro-polish pass (disabled by default)
-            micro_polish_enabled: false,          // Off by default (user opt-in)
-            micro_polish_interval: 1000,          // Every 1000 generations
-            micro_polish_vertex_step: 1.0,        // 1 pixel nudges
-            micro_polish_color_step: 1.0 / 255.0, // 1/255 color nudges
-            micro_polish_cleanup_enabled: true,   // Cleanup tiny polygons
-            micro_polish_min_area_px: 8.0,        // Minimum 8 square pixels
-            micro_polish_cleanup_epsilon: 0.001,  // 0.1% fitness tolerance
+            // micro-polish pass
+            micro_polish_enabled: false,
+            micro_polish_interval: 1000,
+            micro_polish_vertex_step: 1.0,
+            micro_polish_color_step: 1.0 / 255.0,
+            micro_polish_cleanup_enabled: true,
+            micro_polish_min_area_px: 8.0,
+            micro_polish_cleanup_epsilon: 0.001,
 
-            // smart layer reorder (enabled by default)
-            smart_reorder_enabled: true,          // On by default
-            smart_reorder_max_hops: 3,            // Test up to 3 positions up/down
-            smart_reorder_interval: 500,          // Every 500 generations
-            smart_reorder_error_percentile: 0.75, // Top 25% high-error polygons
+            // smart layer reorder
+            smart_reorder_enabled: true,
+            smart_reorder_max_hops: 3,
+            smart_reorder_interval: 500,
+            smart_reorder_error_percentile: 0.75,
 
-            // adaptive step sizes (disabled by default)
-            adaptive_steps_enabled: false,        // Off by default (user opt-in)
-            step_scale_min: 0.25,                 // Fine (25% of base step)
-            step_scale_max: 1.0,                  // Coarse (100% of base step)
-            step_scale_curve: 1.5,                // Curve exponent (biases toward fine late)
+            // adaptive step sizes
+            adaptive_steps_enabled: false,
+            step_scale_min: 0.25,
+            step_scale_max: 1.0,
+            step_scale_curve: 1.5,
 
-            // dynamic alpha schedule (disabled by default)
-            dynamic_alpha_enabled: false,         // Off by default (user opt-in)
-            alpha_min_start: 20.0 / 255.0,        // Start: 20/255 = 0.078
-            alpha_max_start: 200.0 / 255.0,       // Start: 200/255 = 0.784
-            alpha_min_target: 5.0 / 255.0,        // Target: 5/255 = 0.02
-            alpha_max_target: 250.0 / 255.0,      // Target: 250/255 = 0.98
-            alpha_schedule_curve: 1.5,            // Curve exponent (smooth transition)
+            // dynamic alpha schedule
+            dynamic_alpha_enabled: false,
+            alpha_min_start: 20.0 / 255.0,
+            alpha_max_start: 200.0 / 255.0,
+            alpha_min_target: 5.0 / 255.0,
+            alpha_max_target: 250.0 / 255.0,
+            alpha_schedule_curve: 1.5,
 
-            // edge-aware polygon seeding (enabled by default)
-            edge_seeding_enabled: true,           // On by default
-            edge_seeding_probability: 0.7,        // 70% edge-guided, 30% random (exploration)
-            edge_seeding_vertex_range_px: 12.0,   // ±12 pixels along edge directions
+            // edge-aware polygon seeding
+            edge_seeding_enabled: true,
+            edge_seeding_probability: 0.7,
+            edge_seeding_vertex_range_px: 12.0,
 
-            // progressive multi-resolution evolution (opt-in)
-            multi_res_enabled: false,             // Off by default (opt-in feature)
-            multi_res_stage1_threshold: 50.0,     // 50 SAD/px: transition from 1/4x to 1/2x
-            multi_res_stage2_threshold: 15.0,     // 15 SAD/px: transition from 1/2x to 1x
+            // progressive multi-resolution evolution
+            multi_res_enabled: false,
+            multi_res_stage1_threshold: 50.0,
+            multi_res_stage2_threshold: 15.0,
         }
     }
 }
@@ -192,16 +192,16 @@ impl Default for MutateConfig {
 /// color mutation directions for hill-climbing optimization
 #[derive(Debug, Clone, Copy)]
 pub enum ColorDirection {
-    Lighter,     // multiply RGB by 1.1
-    Darker,      // multiply RGB by 0.9
-    RedUp,       // increase R
-    BlueDown,    // decrease B
-    GreenUp,     // increase G
-    RedDown,     // decrease R
-    BlueUp,      // increase B
-    GreenDown,   // decrease G
-    AlphaDown,   // decrease alpha
-    AlphaUp,     // increase alpha
+    Lighter,
+    Darker,
+    RedUp,
+    BlueDown,
+    GreenUp,
+    RedDown,
+    BlueUp,
+    GreenDown,
+    AlphaDown,
+    AlphaUp,
 }
 
 /// apply a color direction mutation to RGBA values
